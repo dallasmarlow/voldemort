@@ -28,11 +28,11 @@ public class RocksDBStorageConfiguration implements StorageConfiguration {
 
         options.setCreateIfMissing(true)
                .setCacheSize(20 * SizeUnit.GB)
-               .setBlockSize(8 * SizeUnit.KB)
-               .setWriteBufferSize(64 * SizeUnit.MB)
-               .setMaxWriteBufferNumber(16)
+               .setBlockSize(16 * SizeUnit.KB)
+               .setWriteBufferSize(128 * SizeUnit.MB)
+               .setMaxWriteBufferNumber(8)
                .setDisableDataSync(true)
-               .setDisableSeekCompaction(false)
+               .setDisableSeekCompaction(true)
                .setMaxBackgroundCompactions(2)
                .setFilter(filter);
 
