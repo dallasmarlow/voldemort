@@ -131,10 +131,30 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
 
     @Override
     public List<Versioned<byte[]>> get(ByteArray key, byte[] transforms) throws PersistenceFailureException {
-        StoreUtils.assertValidKey(key);
         // return StoreUtils.get(this, key, transforms);
+        StoreUtils.assertValidKey(key);
 
-        throw new PersistenceFailureException("Unable to get store entry!");
+        try {
+            // uncommitted reads are perfectly fine now, since we have no
+            // je-delete() in put()
+            byte[] realkey = key.get();
+            if (realkey == null)
+                return java.util.Collections.emptyList();
+            byte[] result = db.get(realkey);
+            if (result == null)
+                return java.util.Collections.emptyList();
+            else
+                return StoreBinaryFormat.fromByteArray(result);
+        } catch(RocksDBException e) {
+            logger.error(e);
+            throw new PersistenceFailureException("Unable to get store entry!");
+        } finally {
+            if(logger.isTraceEnabled()) {
+                logger.trace("Completed GET (" + getName() + ") from key " + key + " (keyRef: "
+                             + System.identityHashCode(key) + ") in "
+                             + System.currentTimeMillis());
+            }
+        }
     }
 
     @Override
@@ -146,9 +166,9 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
 
     @Override
     public List<Version> getVersions(ByteArray key) {
-        // return StoreUtils.getVersions(get(key, null));
+        return StoreUtils.getVersions(get(key, null));
 
-        throw new UnsupportedOperationException("Do you even know how vector clocks work!?");
+        //throw new UnsupportedOperationException("Do you even know how vector clocks work!?");
     }
 
     @Override
