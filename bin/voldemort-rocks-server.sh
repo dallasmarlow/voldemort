@@ -20,7 +20,7 @@ base_dir=$(pwd)
 config_file=$1
 
 if [[ -z $config_file ]]; then
-  config_file="config/voldemort_rocks_single_node_cluster"
+  config_file="config/single_node_rocks_server"
 fi
 
 for file in $base_dir/dist/*.jar;
