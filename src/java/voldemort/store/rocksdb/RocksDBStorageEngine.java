@@ -11,11 +11,13 @@ import java.io.IOException;
 import org.rocksdb.*;
 import org.rocksdb.util.SizeUnit;
 
+import voldemort.store.rocksdb.RocksDBStorageUtil;
+import voldemort.store.rocksdb.RocksDBClosableIterator;
+
 import voldemort.VoldemortException;
 import voldemort.store.StoreUtils;
 import voldemort.store.AbstractStorageEngine;
 import voldemort.store.PersistenceFailureException;
-import voldemort.store.rocksdb.RocksDBStorageUtil;
 import voldemort.utils.ByteArray;
 import voldemort.utils.ClosableIterator;
 import voldemort.utils.Pair;
@@ -55,7 +57,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
 
     @Override
     public ClosableIterator<ByteArray> keys() {
-        return StoreUtils.keys(entries());
+        return new RocksDBClosableKeysIterator(this.db, "first");
     }
 
     @Override
@@ -66,7 +68,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
     @Override
     public ClosableIterator<Pair<ByteArray, Versioned<byte[]>>> entries() {
         try {
-            return new RocksDBClosableIterator(this.db, "first");
+            return new RocksDBClosableEntriesIterator(this.db, "first");
         } catch(Exception e) {
             throw new PersistenceFailureException("Unable to instantiate store iterator!", e);
         }
@@ -96,7 +98,49 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
     public Map<ByteArray, List<Versioned<byte[]>>> getAll(Iterable<ByteArray> keys,
                                                           Map<ByteArray, byte[]> transforms) {
 
-        throw new UnsupportedOperationException("`getAll` is not a supported store operation!");
+        StoreUtils.assertValidKeys(keys);
+        String select = "select version_, value_ from " + getName() + " where key_ = ?";
+
+        try {
+            Map<ByteArray, List<Versioned<byte[]>>> result = StoreUtils.newEmptyHashMap(keys);
+
+            for (ByteArray key: keys) {
+                RocksDBClosableIterator iterator = new RocksDBClosableIterator(this.db, key.get());
+                List<Versioned<byte[]>> entries = Lists.newArrayList();
+
+
+            }
+        } catch(Exception e) {
+            throw new PersistenceFailureException("Unable to get all requested keys", e);
+        }
+
+
+        try {
+
+            Map<ByteArray, List<Versioned<byte[]>>> result = StoreUtils.newEmptyHashMap(keys);
+            for(ByteArray key: keys) {
+                stmt.setBytes(1, key.get());
+                rs = stmt.executeQuery();
+                List<Versioned<byte[]>> found = Lists.newArrayList();
+                while(rs.next()) {
+                    byte[] version = rs.getBytes("version_");
+                    byte[] value = rs.getBytes("value_");
+                    found.add(new Versioned<byte[]>(value, new VectorClock(version)));
+                }
+                if(found.size() > 0)
+                    result.put(key, found);
+            }
+            return result;
+        } catch(SQLException e) {
+            throw new PersistenceFailureException("Fix me!", e);
+        } finally {
+            tryClose(rs);
+            tryClose(stmt);
+            tryClose(conn);
+        }
+
+
+
     }
 
     @Override
@@ -161,19 +205,14 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         }
     }
 
-    private class RocksDBClosableIterator implements ClosableIterator<Pair<ByteArray, Versioned<byte[]>>> {
-        private RocksDB db;
-        private Boolean isValid;
-        private Boolean hasIterated;
-        private final Iterator iterator;
-
-        public RocksDBClosableIterator(RocksDB db, byte[] key) {
+    private static class RocksDBClosableKeysIterator extends RocksDBClosableIterator<ByteArray> {
+        public RocksDBClosableKeysIterator(RocksDB db, byte[] key) {
             this.db = db;
             this.iterator = db.newIterator();
             this.iterator.seek(key);
         }
 
-        public RocksDBClosableIterator(RocksDB db, String absolutePosition) {
+        public RocksDBClosableKeysIterator(RocksDB db, String absolutePosition) {
             if (! (absolutePosition.equals("first") || absolutePosition.equals("last"))) {
                 throw new PersistenceFailureException("Invalid iterator absolute position passed to `RocksDBClosableIterator`");
             }
@@ -189,56 +228,91 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         }
 
         @Override
-        public boolean hasNext() {
-            if (this.isValid == null && this.iterator.isValid()) this.isValid = true;
+        public ByteArray next() {
+            if (! (hasNext() && this.iterator.isValid())) throw new PersistenceFailureException("Next called on invalid iterator!");
 
+            // calling next on a new iterator will skip a record
+            if (this.hasIterated == true) {
+                this.iterator.next();
+                this.iterator.status();
+
+                // if we've reached the end of the iterator, then prevent future iteration
+                if (! this.iterator.isValid()) this.isValid = false;                
+            } else {
+                this.hasIterated = true;
+            }
+
+            return new ByteArray(this.iterator.key());
+        }
+    }
+
+    private static class RocksDBClosableEntriesIterator extends RocksDBClosableIterator<Pair<ByteArray, Versioned<byte[]>>> {
+        private List<Pair<ByteArray, Versioned<byte[]>>> iteratorCache;
+
+        public RocksDBClosableEntriesIterator(RocksDB db, byte[] key) {
+            this.iteratorCache = new ArrayList<Pair<ByteArray, Versioned<byte[]>>>();
+
+            this.db = db;
+            this.iterator = db.newIterator();
+            this.iterator.seek(key);
+        }
+
+        public RocksDBClosableEntriesIterator(RocksDB db, String absolutePosition) {
+            if (! (absolutePosition.equals("first") || absolutePosition.equals("last"))) {
+                throw new PersistenceFailureException("Invalid iterator absolute position passed to `RocksDBClosableIterator`");
+            }
+
+            this.iteratorCache = new ArrayList<Pair<ByteArray, Versioned<byte[]>>>();
+
+            this.db = db;
+            this.iterator = db.newIterator();
+
+            if (absolutePosition.equals("first")) {
+                this.iterator.seekToFirst();
+            } else {
+                this.iterator.seekToLast();
+            }
+        }
+
+        @Override
+        public boolean hasNext() {
+            if (iteratorCache.size() > 0) return true;
+
+            if (this.isValid == null && this.iterator.isValid()) this.isValid = true;
             return this.isValid;
         }
 
         @Override
         public Pair<ByteArray, Versioned<byte[]>> next() {
             try {
-                if (! (hasNext() && this.iterator.isValid())) throw new PersistenceFailureException("Next called on invalid iterator!");
-
-                // calling next on a new iterator will skip a record
-                if (this.hasIterated == true) {
-                    this.iterator.next();
-                    this.iterator.status();
-
-                    // if we've reached the end of the iterator, then prevent future iteration
-                    if (! this.iterator.isValid()) this.isValid = false;
+                if (iteratorCache.size() > 0) {
+                    return iteratorCache.remove(iteratorCache.size() - 1);
                 } else {
-                    this.hasIterated = true;
+                    if (! (hasNext() && this.iterator.isValid())) throw new PersistenceFailureException("Next called on invalid iterator!");
+
+                    // calling next on a new iterator will skip a record
+                    if (this.hasIterated == true) {
+                        this.iterator.next();
+                        this.iterator.status();
+
+                        // if we've reached the end of the iterator, then prevent future iteration
+                        if (! this.iterator.isValid()) this.isValid = false;
+                    } else {
+                        this.hasIterated = true;
+                    }
+
+                    ByteArray key   = new ByteArray(StoreBinaryFormat.extractKey(this.iterator.key()));
+                    ByteArray value = new ByteArray(this.iterator.value());
+
+                    for (Versioned<byte[]> valueVersion: StoreBinaryFormat.fromByteArray(value)) {
+                        this.iteratorCache.add(Pair.create(key, valueVersion));
+                    }
+
+                    return next();
                 }
-
-                byte[] key   = this.iterator.key();
-                byte[] value = this.iterator.value();
-
-                // the last 8 bytes of a raw key are the stored version
-                int versionlessKeyLength = key.length - 8;
-                byte[] versionlessKey     = new byte[versionlessKeyLength];
-                System.arraycopy(key, 0, versionlessKey, 0, versionlessKeyLength);
-                VectorClock clock = new VectorClock(key, versionlessKeyLength);
-
-                return Pair.create(new ByteArray(versionlessKey), new Versioned<byte[]>(value, clock));
             } catch(Exception e) {
                 throw new PersistenceFailureException(e);
             }
-        }
-
-        @Override
-        public void remove() {
-            try {
-                this.db.remove(this.iterator.key());
-            } catch(RocksDBException e) {
-                logger.error(e);
-            }
-        }
-
-        @Override
-        public void close() {
-            this.isValid = false;
-            this.iterator.dispose();
         }
     }
 }
