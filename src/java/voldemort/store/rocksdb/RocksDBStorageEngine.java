@@ -12,7 +12,6 @@ import org.rocksdb.*;
 import org.rocksdb.util.SizeUnit;
 
 import voldemort.store.rocksdb.RocksDBStorageUtil;
-import voldemort.store.rocksdb.RocksDBClosableIterator;
 
 import voldemort.VoldemortException;
 import voldemort.store.StoreUtils;
@@ -227,7 +226,12 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         }
     }
 
-    private static class RocksDBClosableKeysIterator extends RocksDBClosableIterator<ByteArray> {
+    private static class RocksDBClosableKeysIterator<ByteArray> {
+        private RocksDB db;
+        private Boolean isValid;
+        private Boolean hasIterated;
+        private final Iterator iterator;
+
         public RocksDBClosableKeysIterator(RocksDB db, byte[] key) {
             this.db = db;
             this.iterator = db.newIterator();
@@ -250,6 +254,28 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         }
 
         @Override
+        public boolean hasNext() {
+            if (this.isValid == null && this.iterator.isValid()) this.isValid = true;
+
+            return this.isValid;
+        }
+
+        @Override
+        public void remove() {
+            try {
+                this.db.remove(this.iterator.key());
+            } catch(RocksDBException e) {
+                logger.error(e);
+            }
+        }
+
+        @Override
+        public void close() {
+            this.isValid = false;
+            this.iterator.dispose();
+        }
+
+        @Override
         public ByteArray next() {
             if (! (hasNext() && this.iterator.isValid())) throw new PersistenceFailureException("Next called on invalid iterator!");
 
@@ -268,7 +294,13 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         }
     }
 
-    private static class RocksDBClosableEntriesIterator extends RocksDBClosableIterator<Pair<ByteArray, Versioned<byte[]>>> {
+    private class RocksDBClosableEntriesIterator<Pair<ByteArray, Versioned<byte[]>>> {
+        private RocksDB db;
+        private Boolean isValid;
+        private Boolean hasIterated;
+        private final Iterator iterator;
+
+
         private List<Pair<ByteArray, Versioned<byte[]>>> iteratorCache;
 
         public RocksDBClosableEntriesIterator(RocksDB db, byte[] key) {
@@ -302,6 +334,21 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
 
             if (this.isValid == null && this.iterator.isValid()) this.isValid = true;
             return this.isValid;
+        }
+
+        @Override
+        public void remove() {
+            try {
+                this.db.remove(this.iterator.key());
+            } catch(RocksDBException e) {
+                logger.error(e);
+            }
+        }
+
+        @Override
+        public void close() {
+            this.isValid = false;
+            this.iterator.dispose();
         }
 
         @Override
