@@ -176,7 +176,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         try {
             StoreUtils.assertValidKey(key);
             Boolean entriesDeleted = false;
-            RocksDBClosableIterator iterator = new RocksDBClosableIterator(this.db, key.get());
+            RocksDBClosableEntriesIterator iterator = new RocksDBClosableEntriesIterator(this.db, key.get());
 
             while (iterator.hasNext()) {
                 Pair<ByteArray, Versioned<byte[]>> entry = iterator.next();
