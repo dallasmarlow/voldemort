@@ -81,7 +81,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
 
     //TODO implement key-specific locking to reduce contention
     @Override
-    public synchronized void put(ByteArray key, Versioned<byte[]> value, byte[] transforms) throws PersistenceFailureException {
+    public void put(ByteArray key, Versioned<byte[]> value, byte[] transforms) throws PersistenceFailureException {
         StoreUtils.assertValidKey(key);
 
         boolean succeeded = false;
@@ -282,7 +282,12 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
             // calling next on a new iterator will skip a record
             if (this.hasIterated == true) {
                 this.iterator.next();
-                this.iterator.status();
+                try {
+                    this.iterator.status();
+                } catch(RocksDBException e) {
+                    logger.error(e);
+                    throw new PersistenceFailureException(e);
+                }
 
                 // if we've reached the end of the iterator, then prevent future iteration
                 if (! this.iterator.isValid()) this.isValid = false;                
@@ -373,7 +378,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
                     ByteArray key   = new ByteArray(StoreBinaryFormat.extractKey(this.iterator.key()));
                     ByteArray value = new ByteArray(this.iterator.value());
 
-                    for (Versioned<byte[]> valueVersion: StoreBinaryFormat.fromByteArray(value)) {
+                    for (Versioned<byte[]> valueVersion: StoreBinaryFormat.fromByteArray(value.get())) {
                         this.iteratorCache.add(Pair.create(key, valueVersion));
                     }
 
