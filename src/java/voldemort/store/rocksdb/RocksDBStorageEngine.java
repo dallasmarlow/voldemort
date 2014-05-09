@@ -16,6 +16,7 @@ import voldemort.store.rocksdb.RocksDBClosableIterator;
 
 import voldemort.VoldemortException;
 import voldemort.store.StoreUtils;
+import voldemort.store.StoreBinaryFormat;
 import voldemort.store.AbstractStorageEngine;
 import voldemort.store.PersistenceFailureException;
 import voldemort.utils.ByteArray;
@@ -79,19 +80,83 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         throw new UnsupportedOperationException("Partition based entries scan not supported for this storage type");
     }
 
+    //TODO implement key-specific locking to reduce contention
     @Override
-    public void put(ByteArray key, Versioned<byte[]> value, byte[] transforms) throws PersistenceFailureException {
+    public synchronized void put(ByteArray key, Versioned<byte[]> value, byte[] transforms) throws PersistenceFailureException {
         StoreUtils.assertValidKey(key);
 
-        throw new PersistenceFailureException("Does it look like your mom stores data here!?");
+        boolean succeeded = false;
+        List<Versioned<byte[]>> vals = null;
+
+        try {
+            // do a get for the existing values
+            byte[] result = db.get(key.get());
+            if(result != null) {
+                // update
+                vals = StoreBinaryFormat.fromByteArray(result);
+                // compare vector clocks and throw out old ones, for updates
+
+                java.util.Iterator<Versioned<byte[]>> iter = vals.iterator();
+                while(iter.hasNext()) {
+                    Versioned<byte[]> curr = iter.next();
+                    Occurred occurred = value.getVersion().compare(curr.getVersion());
+                    if(occurred == Occurred.BEFORE)
+                        throw new ObsoleteVersionException("Key "
+                                                           + value.getVersion().toString()
+                                                           + " is obsolete, it is no greater than the current version of "
+                                                           + curr.getVersion().toString() + ".");
+                    else if(occurred == Occurred.AFTER)
+                        iter.remove();
+                }
+            } else {
+                // insert
+                vals = new ArrayList<Versioned<byte[]>>(1);
+            }
+
+            // update the new value
+            vals.add(value);
+
+            try {
+                db.put(key.get(), StoreBinaryFormat.toByteArray(vals));
+            } catch(RocksDBException e) {
+                logger.error(e);
+                throw new PersistenceFailureException("Does it look like your mom stores data here!?");
+            }
+
+            succeeded = true;
+
+        } catch(RocksDBException e) {
+            logger.error("Error in put for store " + this.getName(), e);
+            throw new PersistenceFailureException(e);
+        }
     }
 
     @Override
     public List<Versioned<byte[]>> get(ByteArray key, byte[] transforms) throws PersistenceFailureException {
-        StoreUtils.assertValidKey(key);
         // return StoreUtils.get(this, key, transforms);
+        StoreUtils.assertValidKey(key);
 
-        throw new PersistenceFailureException("Unable to get store entry!");
+        try {
+            // uncommitted reads are perfectly fine now, since we have no
+            // je-delete() in put()
+            byte[] realkey = key.get();
+            if (realkey == null)
+                return java.util.Collections.emptyList();
+            byte[] result = db.get(realkey);
+            if (result == null)
+                return java.util.Collections.emptyList();
+            else
+                return StoreBinaryFormat.fromByteArray(result);
+        } catch(RocksDBException e) {
+            logger.error(e);
+            throw new PersistenceFailureException("Unable to get store entry!");
+        } finally {
+            if(logger.isTraceEnabled()) {
+                logger.trace("Completed GET (" + getName() + ") from key " + key + " (keyRef: "
+                             + System.identityHashCode(key) + ") in "
+                             + System.currentTimeMillis());
+            }
+        }
     }
 
     @Override
@@ -145,9 +210,9 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
 
     @Override
     public List<Version> getVersions(ByteArray key) {
-        // return StoreUtils.getVersions(get(key, null));
+        return StoreUtils.getVersions(get(key, null));
 
-        throw new UnsupportedOperationException("Do you even know how vector clocks work!?");
+        //throw new UnsupportedOperationException("Do you even know how vector clocks work!?");
     }
 
     @Override
