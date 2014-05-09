@@ -12,14 +12,14 @@
                 <host>voldemort-b1b3e37d.ewr01.tumblr.net</host>
                 <http-port>8081</http-port>
                 <socket-port>6666</socket-port>
-                <partitions>0, 1</partitions>
+                <partitions>1, 2</partitions>
         </server>
         <server>
                 <id>2</id>
                 <host>voldemort-37b4f395.ewr01.tumblr.net</host>
                 <http-port>8081</http-port>
                 <socket-port>6666</socket-port>
-                <partitions>0, 1</partitions>
+                <partitions>2, 3</partitions>
         </server>
 </cluster>
 
