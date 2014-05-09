@@ -162,57 +162,14 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
     @Override
     public Map<ByteArray, List<Versioned<byte[]>>> getAll(Iterable<ByteArray> keys,
                                                           Map<ByteArray, byte[]> transforms) {
-
         StoreUtils.assertValidKeys(keys);
-        String select = "select version_, value_ from " + getName() + " where key_ = ?";
-
-        try {
-            Map<ByteArray, List<Versioned<byte[]>>> result = StoreUtils.newEmptyHashMap(keys);
-
-            for (ByteArray key: keys) {
-                RocksDBClosableIterator iterator = new RocksDBClosableIterator(this.db, key.get());
-                List<Versioned<byte[]>> entries = Lists.newArrayList();
-
-
-            }
-        } catch(Exception e) {
-            throw new PersistenceFailureException("Unable to get all requested keys", e);
-        }
-
-
-        try {
-
-            Map<ByteArray, List<Versioned<byte[]>>> result = StoreUtils.newEmptyHashMap(keys);
-            for(ByteArray key: keys) {
-                stmt.setBytes(1, key.get());
-                rs = stmt.executeQuery();
-                List<Versioned<byte[]>> found = Lists.newArrayList();
-                while(rs.next()) {
-                    byte[] version = rs.getBytes("version_");
-                    byte[] value = rs.getBytes("value_");
-                    found.add(new Versioned<byte[]>(value, new VectorClock(version)));
-                }
-                if(found.size() > 0)
-                    result.put(key, found);
-            }
-            return result;
-        } catch(SQLException e) {
-            throw new PersistenceFailureException("Fix me!", e);
-        } finally {
-            tryClose(rs);
-            tryClose(stmt);
-            tryClose(conn);
-        }
-
-
-
+        return StoreUtils.getAll(this, keys, transforms);
     }
+
 
     @Override
     public List<Version> getVersions(ByteArray key) {
         return StoreUtils.getVersions(get(key, null));
-
-        //throw new UnsupportedOperationException("Do you even know how vector clocks work!?");
     }
 
     @Override
