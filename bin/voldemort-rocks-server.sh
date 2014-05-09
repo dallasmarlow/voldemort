@@ -17,6 +17,11 @@
 #
 
 base_dir=$(pwd)
+config_file=$1
+
+if [[ -z $config_file ]]; then
+  config_file="config/voldemort_rocks_single_node_cluster"
+fi
 
 for file in $base_dir/dist/*.jar;
 do
@@ -40,4 +45,4 @@ if [ -z "$VOLD_OPTS" ]; then
 fi
 
 export CLASSPATH
-java -Dlog4j.configuration=file://$base_dir/src/java/log4j.properties $VOLD_OPTS voldemort.server.VoldemortServer config/voldemort_rocks_single_node_cluster
+java -Dlog4j.configuration=file://$base_dir/src/java/log4j.properties $VOLD_OPTS voldemort.server.VoldemortServer $config_file
