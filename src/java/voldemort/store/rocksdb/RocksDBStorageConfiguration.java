@@ -27,10 +27,12 @@ public class RocksDBStorageConfiguration implements StorageConfiguration {
         Filter filter   = new BloomFilter(10);
 
         options.setCreateIfMissing(true)
+               .setCacheSize(20 * SizeUnit.GB)
+               .setBlockSize(8 * SizeUnit.KB)
                .setWriteBufferSize(64 * SizeUnit.MB)
                .setMaxWriteBufferNumber(16)
+               .setDisableDataSync(true)
                .setDisableSeekCompaction(true)
-               .setBlockSize(16 * SizeUnit.KB)
                .setMaxBackgroundCompactions(2)
                .setFilter(filter);
 
