@@ -226,7 +226,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         }
     }
 
-    private static class RocksDBClosableKeysIterator<ByteArray> {
+    private static class RocksDBClosableKeysIterator implements ClosableIterator<ByteArray> {
         private RocksDB db;
         private Boolean isValid;
         private Boolean hasIterated;
@@ -294,7 +294,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         }
     }
 
-    private class RocksDBClosableEntriesIterator<Pair<ByteArray, Versioned<byte[]>>> {
+    private class RocksDBClosableEntriesIterator implements ClosableIterator<Pair<ByteArray, Versioned<byte[]>>> {
         private RocksDB db;
         private Boolean isValid;
         private Boolean hasIterated;
