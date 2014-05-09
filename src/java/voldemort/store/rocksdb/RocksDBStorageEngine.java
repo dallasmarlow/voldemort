@@ -27,6 +27,7 @@ import voldemort.versioning.Versioned;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.io.FileUtils;
+import org.apache.log4j.Logger;
 
 import com.google.common.collect.Lists;
 
@@ -38,13 +39,18 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
     private RocksDB db;
     private final Options options;
     private final String  databasePath;
+    private static final Logger logger = Logger.getLogger(RocksDBStorageEngine.class);
 
     public RocksDBStorageEngine(String storeName, String dataDirectory, Options options) {
         super(storeName);
 
-        this.databasePath = StringUtils.join(new String[] {dataDirectory, name}, "/");
+        this.databasePath = StringUtils.join(new String[] {dataDirectory, storeName}, "/");
         this.options = options;
-        this.db = RocksDB.open(this.databasePath, this.options);
+        try {
+            this.db = RocksDB.open(this.options, this.databasePath) ;
+        } catch(RocksDBException e) {
+            logger.error(e);
+        }
     }
 
     @Override
@@ -62,7 +68,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         try {
             return new RocksDBClosableIterator(this.db, "first");
         } catch(Exception e) {
-            throw new PersistenceFailureException("Unable to instantiate store iterator!", e)
+            throw new PersistenceFailureException("Unable to instantiate store iterator!", e);
         }
     }
 
@@ -75,7 +81,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
     public void put(ByteArray key, Versioned<byte[]> value, byte[] transforms) throws PersistenceFailureException {
         StoreUtils.assertValidKey(key);
 
-        throw new PersistenceFailureException("Does it look like your mom stores data here!?")
+        throw new PersistenceFailureException("Does it look like your mom stores data here!?");
     }
 
     @Override
@@ -97,7 +103,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
     public List<Version> getVersions(ByteArray key) {
         // return StoreUtils.getVersions(get(key, null));
 
-        throw new UnsupportedOperationException("Do you even know how vector clocks work!?")
+        throw new UnsupportedOperationException("Do you even know how vector clocks work!?");
     }
 
     @Override
@@ -108,9 +114,9 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
             RocksDBClosableIterator iterator = new RocksDBClosableIterator(this.db, key.get());
 
             while (iterator.hasNext()) {
-                Pair<ByteArray>, Versioned<byte[]>> entry = iterator.next();
+                Pair<ByteArray, Versioned<byte[]>> entry = iterator.next();
 
-                ByteArray key   = entry.getFirst();
+                key             = entry.getFirst();
                 Version version = entry.getSecond().getVersion();
 
                 if ((maxVersion == null) || (version.compare(maxVersion) == Occurred.BEFORE)) {
@@ -147,7 +153,11 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
             throw new VoldemortException("Failed to truncate store!", e);
         } finally {
             // reopen database (which will recreate the directory)
-            this.db = RocksDB.open(this.databasePath, this.options);
+            try {
+                this.db = RocksDB.open(this.options, this.databasePath) ;
+            } catch(RocksDBException e) {
+                logger.error(e);
+            }
         }
     }
 
@@ -186,7 +196,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
         }
 
         @Override
-        public Pair<ByteArray>, Versioned<byte[]>> next() {
+        public Pair<ByteArray, Versioned<byte[]>> next() {
             try {
                 if (! (hasNext() && this.iterator.isValid())) throw new PersistenceFailureException("Next called on invalid iterator!");
 
@@ -205,7 +215,7 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
                 byte[] value = this.iterator.value();
 
                 // the last 8 bytes of a raw key are the stored version
-                long versionlessKeyLength = key.length - 8;
+                int versionlessKeyLength = key.length - 8;
                 byte[] versionlessKey     = new byte[versionlessKeyLength];
                 System.arraycopy(key, 0, versionlessKey, 0, versionlessKeyLength);
                 VectorClock clock = new VectorClock(key, versionlessKeyLength);
@@ -218,7 +228,11 @@ public class RocksDBStorageEngine extends AbstractStorageEngine<ByteArray, byte[
 
         @Override
         public void remove() {
-            this.db.remove(this.iterator.key());
+            try {
+                this.db.remove(this.iterator.key());
+            } catch(RocksDBException e) {
+                logger.error(e);
+            }
         }
 
         @Override
