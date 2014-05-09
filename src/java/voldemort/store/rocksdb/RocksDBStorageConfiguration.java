@@ -32,7 +32,7 @@ public class RocksDBStorageConfiguration implements StorageConfiguration {
                .setWriteBufferSize(64 * SizeUnit.MB)
                .setMaxWriteBufferNumber(16)
                .setDisableDataSync(true)
-               .setDisableSeekCompaction(true)
+               .setDisableSeekCompaction(false)
                .setMaxBackgroundCompactions(2)
                .setFilter(filter);
 
