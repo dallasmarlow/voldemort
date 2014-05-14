@@ -27,13 +27,25 @@ public class RocksDBStorageConfiguration implements StorageConfiguration {
         Filter filter   = new BloomFilter(10);
 
         options.setCreateIfMissing(true)
-               .setCacheSize(20 * SizeUnit.GB)
-               .setBlockSize(16 * SizeUnit.KB)
-               .setWriteBufferSize(128 * SizeUnit.MB)
-               .setMaxWriteBufferNumber(8)
-               .setDisableDataSync(true)
+               .setBlockSize(524288)
+               .setMaxOpenFiles(10000)
+               .setUseFsync(false)
+               .setBytesPerSync(8388608)
+               .setDisableDataSync(false)
+               .setCacheSize(8589934592)
+               .setTableCacheNumshardbits(6)
+               .setMaxWriteBufferNumber(32)
+               .setWriteBufferSize(536870912)
+               .setTargetFileSizeBase(1073741824)
+               .setMinWriteBufferNumberToMerge(4)
+               .setLevelZeroStopWritesTrigger(2000)
+               .setLevelZeroSlowdownWritesTrigger(0)
+               .setMemTableConfig(new SkipListMemTableConfig())
+               .setCompactionStyle((byte)0x1) // this may enable universal rather than level
+               .setMaxBackgroundCompactions(4)
+               .setMaxBackgroundFlushes(4)
+               .setFilterDeletes(false)
                .setDisableSeekCompaction(true)
-               .setMaxBackgroundCompactions(2)
                .setFilter(filter);
 
         this.options = options;
