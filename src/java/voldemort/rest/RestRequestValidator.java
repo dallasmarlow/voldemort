@@ -48,9 +48,20 @@ public abstract class RestRequestValidator {
      * @return true if request is valid else false
      */
     protected boolean parseAndValidateRequest() {
-        if(!hasKey() || !hasTimeOutHeader() || !hasTimeStampHeader() || !isStoreValid()) {
+        if(!hasKey() || !hasTimeOutHeader() || !isStoreValid()) {
             return false;
         }
+
+        // TODO: remove the originTime field from request header,
+        // because coordinator should not accept the request origin time
+        // from the client.. In this commit, we only changed
+        // "this.parsedRequestOriginTimeInMs" from
+        // "Long.parseLong(originTime)" to current system time,
+        // The reason that we did not remove the field from request
+        // header right now, is because this commit is a quick fix for
+        // internal performance test to be available as soon as
+        // possible.
+        this.parsedRequestOriginTimeInMs = System.currentTimeMillis();
 
         // Retrieve the routing code from the header
         parseRoutingCodeHeader();
@@ -130,56 +141,6 @@ public abstract class RestRequestValidator {
                                                     "Incorrect routing type code: " + rtCode);
             }
         }
-    }
-
-    /**
-     * Retrieve and validate the timestamp value from the REST request.
-     * "X_VOLD_REQUEST_ORIGIN_TIME_MS" is timestamp header
-     * 
-     * TODO REST-Server 1. Change Time stamp header to a better name.
-     * 
-     * @return true if present, false if missing
-     */
-    protected boolean hasTimeStampHeader() {
-        String originTime = request.getHeader(RestMessageHeaders.X_VOLD_REQUEST_ORIGIN_TIME_MS);
-        boolean result = false;
-        if(originTime != null) {
-            try {
-                // TODO: remove the originTime field from request header,
-                // because coordinator should not accept the request origin time
-                // from the client.. In this commit, we only changed
-                // "this.parsedRequestOriginTimeInMs" from
-                // "Long.parseLong(originTime)" to current system time,
-                // The reason that we did not remove the field from request
-                // header right now, is because this commit is a quick fix for
-                // internal performance test to be available as soon as
-                // possible.
-
-                this.parsedRequestOriginTimeInMs = System.currentTimeMillis();
-                if(this.parsedRequestOriginTimeInMs < 0) {
-                    RestErrorHandler.writeErrorResponse(messageEvent,
-                                                        HttpResponseStatus.BAD_REQUEST,
-                                                        "Origin time cannot be negative ");
-
-                } else {
-                    result = true;
-                }
-            } catch(NumberFormatException nfe) {
-                logger.error("Exception when validating request. Incorrect origin time parameter. Cannot parse this to long: "
-                                     + originTime,
-                             nfe);
-                RestErrorHandler.writeErrorResponse(this.messageEvent,
-                                                    HttpResponseStatus.BAD_REQUEST,
-                                                    "Incorrect origin time parameter. Cannot parse this to long: "
-                                                            + originTime);
-            }
-        } else {
-            logger.error("Error when validating request. Missing origin time parameter.");
-            RestErrorHandler.writeErrorResponse(this.messageEvent,
-                                                HttpResponseStatus.BAD_REQUEST,
-                                                "Missing origin time parameter.");
-        }
-        return result;
     }
 
     /**
