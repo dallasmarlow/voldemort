@@ -185,7 +185,7 @@ public class HadoopStoreJobRunner extends Configured implements Tool {
         Class[] deps = new Class[] { ImmutableCollection.class, JDOMException.class,
                 VoldemortConfig.class, HadoopStoreJobRunner.class, mapperClass };
 
-        int numChunks = CmdUtils.valueOf(options, "num-chunks", -1);
+        int numChunks = CmdUtils.valueOf(options, "num-chunks", 10);
         boolean isAvro = CmdUtils.valueOf(options, "is-avro", false);
 
         addDepJars(conf, deps, addJars);
