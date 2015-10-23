@@ -408,6 +408,43 @@ message ReserveMemoryResponse {
   optional Error error = 1;
 }
 
+message GetHighAvailabilitySettingsRequest {
+}
+
+message GetHighAvailabilitySettingsResponse {
+  required bool enabled = 1;
+  optional string cluster_id = 2;
+  optional int32 max_node_failure = 3;
+  optional string lock_path = 4;
+  optional string lock_implementation = 5;
+}
+
+message DisableStoreVersionRequest {
+  required string store_name = 1;
+  required int64 push_version = 2;
+  optional string info = 3;
+}
+
+message DisableStoreVersionResponse {
+  required bool disable_success = 1;
+  optional bool disable_persistence_success = 2;
+  optional string info = 3;
+  optional int32 node_id = 4;
+}
+
+message HandleFetchFailureRequest {
+  repeated int32 failed_nodes = 1;
+  required string store_name = 2;
+  required int64 push_version = 3;
+  optional string info = 4;
+}
+
+message HandleFetchFailureResponse {
+  required bool swap_is_possible = 1;
+  optional string info = 2;
+  repeated DisableStoreVersionResponse disable_store_responses = 3;
+}
+
 enum AdminRequestType {
   GET_METADATA = 0;
   UPDATE_METADATA = 1;
@@ -448,6 +485,9 @@ enum AdminRequestType {
   GET_SCHEDULED_JOB_STATUS = 38;
   STOP_SCHEDULED_JOB = 39;
   ENABLE_SCHEDULED_JOB = 40;
+  GET_HA_SETTINGS = 41;
+  DISABLE_STORE_VERSION = 42;
+  HANDLE_FETCH_FAILURE = 43;
 }
 
 message VoldemortAdminRequest {
@@ -491,4 +531,7 @@ message VoldemortAdminRequest {
   optional GetScheduledJobStatusRequest get_scheduled_job_status = 40;
   optional StopScheduledJobRequest stop_scheduled_job = 41;
   optional EnableScheduledJobRequest enable_scheduled_job = 42;
+  optional GetHighAvailabilitySettingsRequest get_ha_settings = 43;
+  optional DisableStoreVersionRequest disable_store_version = 44;
+  optional HandleFetchFailureRequest handle_fetch_failure = 45;
 }

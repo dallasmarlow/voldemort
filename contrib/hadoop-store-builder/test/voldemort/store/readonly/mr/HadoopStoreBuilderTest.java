@@ -1,12 +1,12 @@
 /*
  * Copyright 2008-2009 LinkedIn, Inc
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
  * the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
  * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
@@ -40,6 +40,7 @@ import org.junit.runners.Parameterized.Parameters;
 
 import voldemort.ServerTestUtils;
 import voldemort.TestUtils;
+import voldemort.VoldemortException;
 import voldemort.client.RoutingTier;
 import voldemort.cluster.Cluster;
 import voldemort.routing.RoutingStrategyFactory;
@@ -58,8 +59,8 @@ import voldemort.store.readonly.ReadOnlyStorageFormat;
 import voldemort.store.readonly.ReadOnlyStorageMetadata;
 import voldemort.store.readonly.SearchStrategy;
 import voldemort.store.readonly.checksum.CheckSum;
-import voldemort.store.readonly.checksum.CheckSumTests;
 import voldemort.store.readonly.checksum.CheckSum.CheckSumType;
+import voldemort.store.readonly.checksum.CheckSumTests;
 import voldemort.store.readonly.fetcher.HdfsFetcher;
 import voldemort.store.serialized.SerializingStore;
 import voldemort.utils.ByteArray;
@@ -68,12 +69,13 @@ import voldemort.utils.ClosableIterator;
 import voldemort.utils.Pair;
 import voldemort.versioning.Versioned;
 
+
 /**
  * Unit test to check Read-Only Batch Indexer <strong>in Local mode numReduce
  * will be only one hence we will see only one node files irrespective of
  * cluster details.</strong>
- * 
- * 
+ *
+ *
  */
 @RunWith(Parameterized.class)
 @SuppressWarnings("deprecation")
@@ -114,7 +116,7 @@ public class HadoopStoreBuilderTest {
     /**
      * Issue 258 : 'node--1' produced during store building if some reducer does
      * not get any data.
-     * 
+     *
      * @throws Exception
      */
     @Test
@@ -150,20 +152,20 @@ public class HadoopStoreBuilderTest {
                                                           .setRequiredWrites(1)
                                                           .build();
         HadoopStoreBuilder builder = new HadoopStoreBuilder(new Configuration(),
-                                                            TextStoreMapper.class,
-                                                            TextInputFormat.class,
-                                                            cluster,
-                                                            def,
-                                                            new Path(tempDir.getAbsolutePath()),
-                                                            new Path(outputDir.getAbsolutePath()),
-                                                            new Path(inputFile.getAbsolutePath()),
-                                                            CheckSumType.MD5,
-                                                            saveKeys,
-                                                            false,
-                                                            64 * 1024,
-                                                            -1,
-                                                            false,
-                null);
+                                       TextStoreMapper.class,
+                                       TextInputFormat.class,
+                                       cluster,
+                                       def,
+                                       new Path(tempDir.getAbsolutePath()),
+                                       new Path(outputDir.getAbsolutePath()),
+                                       new Path(inputFile.getAbsolutePath()),
+                                       CheckSumType.MD5,
+                                       saveKeys,
+                                       false,
+                                       64 * 1024,
+                                       -1,
+                                       false,
+                                       0L);
         builder.build();
 
         // Should not produce node--1 directory + have one folder for every node
@@ -301,9 +303,14 @@ public class HadoopStoreBuilderTest {
 
         // check values
         for(Map.Entry<String, String> entry: values.entrySet()) {
-            List<Versioned<Object>> found = store.get(entry.getKey(), null);
-            Assert.assertEquals("Incorrect number of results", 1, found.size());
-            Assert.assertEquals(entry.getValue(), found.get(0).getValue());
+            String key = entry.getKey();
+            try {
+                List<Versioned<Object>> found = store.get(key, null);
+                Assert.assertEquals("Incorrect number of results", 1, found.size());
+                Assert.assertEquals(entry.getValue(), found.get(0).getValue());
+            } catch (VoldemortException e) {
+                throw new VoldemortException("Got an exception while trying to get key '" + key + "'.", e);
+            }
         }
 
         // also check the iterator - first key iterator...

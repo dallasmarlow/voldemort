@@ -16,41 +16,15 @@
 
 package voldemort.client.protocol.admin;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.EOFException;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.StringReader;
-import java.io.UnsupportedEncodingException;
-import java.net.Socket;
-import java.net.SocketException;
-import java.nio.channels.Channels;
-import java.nio.channels.FileChannel;
-import java.nio.channels.ReadableByteChannel;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Properties;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-
+import com.google.common.collect.AbstractIterator;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.Message;
+import com.google.protobuf.UninitializedMessageException;
 import org.apache.commons.io.FileUtils;
 import org.apache.log4j.Logger;
-
 import voldemort.VoldemortException;
 import voldemort.client.ClientConfig;
 import voldemort.client.SocketStoreClientFactory;
@@ -75,12 +49,10 @@ import voldemort.server.protocol.admin.AsyncOperationStatus;
 import voldemort.server.rebalance.VoldemortRebalancingException;
 import voldemort.server.storage.prunejob.VersionedPutPruneJob;
 import voldemort.server.storage.repairjob.RepairJob;
-import voldemort.store.ErrorCodeMapper;
-import voldemort.store.Store;
-import voldemort.store.StoreDefinition;
-import voldemort.store.StoreUtils;
+import voldemort.store.*;
 import voldemort.store.metadata.MetadataStore;
 import voldemort.store.metadata.MetadataStore.VoldemortState;
+import voldemort.store.quota.QuotaExceededException;
 import voldemort.store.quota.QuotaType;
 import voldemort.store.quota.QuotaUtils;
 import voldemort.store.readonly.ReadOnlyStorageConfiguration;
@@ -111,12 +83,30 @@ import voldemort.versioning.Versioned;
 import voldemort.xml.ClusterMapper;
 import voldemort.xml.StoreDefinitionsMapper;
 
-import com.google.common.collect.AbstractIterator;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-import com.google.protobuf.ByteString;
-import com.google.protobuf.Message;
+import java.io.Closeable;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.StringReader;
+import java.io.UnsupportedEncodingException;
+import java.net.Socket;
+import java.net.SocketException;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.channels.ReadableByteChannel;
+import java.util.*;
+import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * AdminClient is intended for administrative functionality that is useful and
@@ -135,7 +125,7 @@ import com.google.protobuf.Message;
  * </ul>
  * 
  */
-public class AdminClient {
+public class AdminClient implements Closeable {
 
     private static final Logger logger = Logger.getLogger(AdminClient.class);
     private static final ClusterMapper clusterMapper = new ClusterMapper();
@@ -279,6 +269,11 @@ public class AdminClient {
                        int zoneID) {
         this(bootstrapURL, adminClientConfig, clientConfig);
         helperOps.initSystemStoreClient(bootstrapURL, zoneID);
+    }
+
+    @Override
+    public String toString() {
+        return "AdminClient with mainBootstrapUrl: " + this.mainBootstrapUrl;
     }
 
     /**
@@ -542,7 +537,7 @@ public class AdminClient {
          * @param originalPartitions The entire replicating partition list
          *        (including the one needed by the restore node)
          * @param donorMap All donor nodes that will be fetched from
-         * @param zondId The zone from which donor nodes will be chosen from; -1
+         * @param zoneId The zone from which donor nodes will be chosen from; -1
          *        means all zones are fine
          * @param cluster The cluster metadata
          * @param storeDef The store to be restored
@@ -641,7 +636,9 @@ public class AdminClient {
                 sands = getSocketAndStreams(destination);
                 return innerSendAndReceive(sands, message, builder);
             } catch(IOException e) {
-                helperOps.close(sands.getSocket());
+                if (sands != null) {
+                    helperOps.close(sands.getSocket());
+                }
                 throw new VoldemortException(e);
             } finally {
                 if(sands != null) {
@@ -869,6 +866,7 @@ public class AdminClient {
 
             String description = null;
             String oldStatus = "";
+            String nodeName = currentCluster.getNodeById(nodeId).briefToString();
 
             // State to detect hung async jobs
             long oldStatusTime = -1;
@@ -880,30 +878,30 @@ public class AdminClient {
                     AsyncOperationStatus status = getAsyncRequestStatus(nodeId, requestId);
                     long statusResponseTime = System.currentTimeMillis();
                     if(!status.getStatus().equalsIgnoreCase(oldStatus)) {
-                        logger.info("Status from node [" + nodeId + "] "+  status);
+                        logger.info(nodeName + " : " +  status);
                         oldStatusTime = statusResponseTime;
                         lastStatusReportTime = oldStatusTime;
                     } else if (statusResponseTime - lastStatusReportTime > maxUnchangingStatusDelay) {
                         // If hung jobs are detected, print out a message periodically
-                        logger.warn("Async Task ID " + requestId + " on node [" + nodeId + "] has not progressed for " +
-                                ((statusResponseTime - oldStatusTime) / 1000) + " seconds.");
+                        logger.warn("Async Task ID " + requestId + " on " + nodeName + " has not progressed for "
+                                    + ((statusResponseTime - oldStatusTime) / 1000) + " seconds.");
                         lastStatusReportTime = statusResponseTime;
                     }
                     oldStatus = status.getStatus();
 
                     if(higherStatus != null) {
-                        higherStatus.setStatus("Status from node " + nodeId + " ("
+                        higherStatus.setStatus("Status from " + nodeName + " ("
                                                + status.getDescription() + ") - "
                                                + status.getStatus());
                     }
                     description = status.getDescription();
                     if(status.hasException()) {
-                        logger.error("Error waiting for completion of status " + status, status.getException());
+                        logger.error("Error waiting for completion of status on " + nodeName + " : "
+                                     + status, status.getException());
                         throw status.getException();
                     }
 
                     if(status.isComplete()) {
-                        logger.info(status.toString() + " Completed.");
                         return status.getStatus();
                     }
 
@@ -916,13 +914,19 @@ public class AdminClient {
                         Thread.currentThread().interrupt();
                     }
                 } catch(Exception e) {
-                    throw new VoldemortException("Failed while waiting for async task ("
-                                                 + description + ") at node " + nodeId
-                                                 + " to finish", e);
+                    String errorMessage = "Failed while waiting for async task ("
+                            + description + ") at " + nodeName
+                            + " to finish";
+                    if(e instanceof VoldemortException) {
+                        throw (VoldemortException) e;
+                    } else {
+                        throw new VoldemortException(errorMessage, e);
+                    }
                 }
             }
             throw new VoldemortException("Failed to finish task requestId: " + requestId
-                                         + " in maxWait " + maxWait + " " + timeUnit.toString());
+                                         + " in maxWait " + maxWait + " " + timeUnit.toString()
+                                         + " on " + nodeName);
         }
 
         /**
@@ -1024,7 +1028,6 @@ public class AdminClient {
         public void waitForCompletion(int nodeId, String key, String value) {
             waitForCompletion(nodeId, key, value, 0, TimeUnit.SECONDS);
         }
-
     }
 
     /**
@@ -1177,7 +1180,6 @@ public class AdminClient {
         /**
          * Sets metadata.
          * 
-         * @param adminClient An instance of AdminClient points to given cluster
          * @param nodeIds Node ids to set metadata
          * @param key Metadata key to set
          * @param value Metadata value to set
@@ -1602,9 +1604,7 @@ public class AdminClient {
          * @param def the definition of the store to add
          */
         public void addStore(StoreDefinition def) {
-            for(Node node: currentCluster.getNodes()) {
-                addStore(def, node.getId());
-            }
+            addStore(def, currentCluster.getNodeIds());
         }
 
         /**
@@ -1615,31 +1615,7 @@ public class AdminClient {
          * @param nodeId Node on which to add the store
          */
         public void addStore(StoreDefinition def, int nodeId) {
-            // Check for backwards compatibility
-            StoreDefinitionUtils.validateSchemasAsNeeded(Arrays.asList(def));
-
-            String value = storeMapper.writeStore(def);
-
-            VAdminProto.AddStoreRequest.Builder addStoreRequest = VAdminProto.AddStoreRequest.newBuilder()
-                                                                                             .setStoreDefinition(value);
-            VAdminProto.VoldemortAdminRequest request = VAdminProto.VoldemortAdminRequest.newBuilder()
-                                                                                         .setType(VAdminProto.AdminRequestType.ADD_STORE)
-                                                                                         .setAddStore(addStoreRequest)
-                                                                                         .build();
-
-            Node node = currentCluster.getNodeById(nodeId);
-            if(null == node)
-                throw new VoldemortException("Invalid node id (" + nodeId + ") specified");
-
-            logger.info("Adding store " + def.getName() + " on node " + node.getHost() + ":"
-                        + node.getId());
-            VAdminProto.AddStoreResponse.Builder response = rpcOps.sendAndReceive(nodeId,
-                                                                                  request,
-                                                                                  VAdminProto.AddStoreResponse.newBuilder());
-            if(response.hasError())
-                helperOps.throwException(response.getError());
-            logger.info("Succesfully added " + def.getName() + " on node " + node.getHost() + ":"
-                        + node.getId());
+            addStore(def, Lists.newArrayList(nodeId));
         }
 
         public void addStore(StoreDefinition def, Collection<Integer> nodeIds) {
@@ -1659,16 +1635,14 @@ public class AdminClient {
                     throw new VoldemortException("Invalid node id (" + nodeId + ") specified");
                 }
 
-                logger.info("Adding store " + def.getName() + " on node " + node.getHost() + ":"
-                            + nodeId);
+                logger.info("Adding store " + def.getName() + " on " + node.briefToString());
                 VAdminProto.AddStoreResponse.Builder response = rpcOps.sendAndReceive(nodeId,
                                                                                       request,
                                                                                       VAdminProto.AddStoreResponse.newBuilder());
                 if(response.hasError()) {
                     helperOps.throwException(response.getError());
                 }
-                logger.info("Succesfully added " + def.getName() + " on node " + node.getHost()
-                            + ":" + nodeId);
+                logger.info("Successfully added " + def.getName() + " on " + node.briefToString());
             }
         }
 
@@ -3948,30 +3922,57 @@ public class AdminClient {
         }
 
         /**
-         * This is a wrapper around {@link #getROMaxVersion(int, List)} where-in
+         * This is a wrapper around {@link #getROMaxVersion(java.util.List, int)} where-in
          * we find the max versions on each machine and then return the max of
-         * all of them
+         * all of them, without tolerating any node failures.
          * 
          * @param storeNames List of all read-only stores
          * @return A map of store-name to their corresponding max version id
          */
         public Map<String, Long> getROMaxVersion(List<String> storeNames) {
+            return getROMaxVersion(storeNames, 0);
+        }
+
+        /**
+         * This is a wrapper around {@link #getROMaxVersion(int, List)} where-in
+         * we find the max versions on each machine and then return the max of
+         * all of them
+         *
+         * @param storeNames List of all read-only stores
+         * @param maxNodeFailures The maximum number of nodes which can fail to respond
+         * @return A map of store-name to their corresponding max version id
+         */
+        public Map<String, Long> getROMaxVersion(List<String> storeNames, int maxNodeFailures) {
+            int nodeFailures = 0;
             Map<String, Long> storeToMaxVersion = Maps.newHashMapWithExpectedSize(storeNames.size());
             for(String storeName: storeNames) {
                 storeToMaxVersion.put(storeName, 0L);
             }
 
             for(Node node: currentCluster.getNodes()) {
-                Map<String, Long> currentNodeVersions = getROMaxVersion(node.getId(), storeNames);
-                for(String storeName: currentNodeVersions.keySet()) {
-                    Long maxVersion = storeToMaxVersion.get(storeName);
-                    if(maxVersion != null && maxVersion < currentNodeVersions.get(storeName)) {
-                        storeToMaxVersion.put(storeName, currentNodeVersions.get(storeName));
+                try {
+                    Map<String, Long> currentNodeVersions = getROMaxVersion(node.getId(), storeNames);
+                    for(String storeName: currentNodeVersions.keySet()) {
+                        Long maxVersion = storeToMaxVersion.get(storeName);
+                        if(maxVersion != null && maxVersion < currentNodeVersions.get(storeName)) {
+                            storeToMaxVersion.put(storeName, currentNodeVersions.get(storeName));
+                        }
+                    }
+                } catch (VoldemortException e) {
+                    nodeFailures++;
+                    if (nodeFailures > maxNodeFailures) {
+                        logger.error("Got an exception while trying to reach node " + node.getId() + ". " +
+                                nodeFailures + " node failure(s) so far; maxNodeFailures exceeded, rethrowing.");
+                        throw e;
+                    } else {
+                        logger.warn("Got an exception while trying to reach node " + node.getId() + ". " +
+                                nodeFailures + " node failure(s) so far; continuing.", e);
                     }
                 }
             }
             return storeToMaxVersion;
         }
+
 
         /**
          * Returns the file names of a specific store on one node.
@@ -3996,6 +3997,29 @@ public class AdminClient {
             }
 
             return response.getFileNameList();
+        }
+
+        public List<String> getSupportedROStorageCompressionCodecs() {
+            Iterator<Node> nodesIterator = currentCluster.getNodes().iterator();
+            VoldemortException lastException = null;
+            while (nodesIterator.hasNext()) {
+                Node node = nodesIterator.next();
+                try {
+                    return getSupportedROStorageCompressionCodecs(node.getId());
+                } catch (VoldemortException e) {
+                    String nextNodeMessage = "";
+                    if (nodesIterator.hasNext()) {
+                        nextNodeMessage = " Will try next node.";
+                    } else {
+                        nextNodeMessage = " Will abort, as all nodes failed.";
+                    }
+                    logger.error("Error while trying to ask " + node.briefToString() +
+                            " for its supported compression codec." + nextNodeMessage +
+                            " Exception message: " + e.getMessage());
+                    lastException = e;
+                }
+            }
+            throw new VoldemortException("Error while trying to ask the cluster for its compression settings. All nodes failed.", lastException);
         }
 
         public List<String> getSupportedROStorageCompressionCodecs(int nodeId) {
@@ -4124,17 +4148,148 @@ public class AdminClient {
             }
 
         }
+
+        public VAdminProto.GetHighAvailabilitySettingsResponse getHighAvailabilitySettings() {
+            Iterator<Node> nodesIterator = currentCluster.getNodes().iterator();
+            VoldemortException lastException = null;
+            while (nodesIterator.hasNext()) {
+                Node node = nodesIterator.next();
+                try {
+                    return getHighAvailabilitySettings(node.getId());
+                } catch (VoldemortException e) {
+                    String nextNodeMessage = "";
+                    if (nodesIterator.hasNext()) {
+                        nextNodeMessage = " Will try next node.";
+                    } else {
+                        nextNodeMessage = " Will abort, as all nodes failed.";
+                    }
+                    logger.error("Error while trying to ask " + node.briefToString() +
+                            " for its HA settings." + nextNodeMessage +
+                            " Exception message: " + e.getMessage());
+                    lastException = e;
+                }
+            }
+            throw new VoldemortException("Error while trying to ask the cluster for its HA settings. All nodes failed.", lastException);
+        }
+
+        public VAdminProto.GetHighAvailabilitySettingsResponse getHighAvailabilitySettings(Integer nodeId) {
+            VAdminProto.GetHighAvailabilitySettingsRequest getHighAvailabilitySettingsRequest =
+                    VAdminProto.GetHighAvailabilitySettingsRequest.newBuilder().build();
+            VAdminProto.VoldemortAdminRequest adminRequest = VAdminProto.VoldemortAdminRequest.newBuilder()
+                    .setGetHaSettings(getHighAvailabilitySettingsRequest)
+                    .setType(VAdminProto.AdminRequestType.GET_HA_SETTINGS)
+                    .build();
+            return rpcOps.sendAndReceive(nodeId,
+                    adminRequest,
+                    VAdminProto.GetHighAvailabilitySettingsResponse.newBuilder()).build();
+        }
+
+        /**
+          * @return the {@link voldemort.client.protocol.pb.VAdminProto.DisableStoreVersionResponse}
+         */
+        public VAdminProto.DisableStoreVersionResponse disableStoreVersion(Integer nodeId, String storeName, Long storeVersion, String info) {
+            VAdminProto.DisableStoreVersionRequest request = VAdminProto.DisableStoreVersionRequest.newBuilder()
+                                                                                                   .setStoreName(storeName)
+                                                                                                   .setPushVersion(storeVersion)
+                                                                                                   .setInfo(info)
+                                                                                                   .build();
+
+            VAdminProto.VoldemortAdminRequest adminRequest = VAdminProto.VoldemortAdminRequest.newBuilder()
+                                                                        .setDisableStoreVersion(request)
+                                                                        .setType(VAdminProto.AdminRequestType.DISABLE_STORE_VERSION)
+                                                                        .build();
+
+            VAdminProto.DisableStoreVersionResponse response = null;
+            VAdminProto.DisableStoreVersionResponse.Builder responseBuilder = VAdminProto.DisableStoreVersionResponse.newBuilder();
+            try {
+                response = rpcOps.sendAndReceive(nodeId,
+                                                 adminRequest,
+                                                 responseBuilder).build();
+            } catch (UnreachableStoreException e) {
+                String errorMessage = "Got an UnreachableStoreException while trying to disableStoreVersion on node " +
+                        nodeId + ", store " + storeName + ", version " + storeVersion + ". If the node is actually " +
+                        "up and merely net-split from us, it might continue serving stale data...";
+                logger.warn(errorMessage, e);
+                response = responseBuilder.setDisableSuccess(false)
+                                          .setInfo(errorMessage)
+                                          .setNodeId(nodeId)
+                                          .build();
+            }
+
+            return response;
+        }
+
+        /**
+         * @return true if it's still possible to do a swap, false otherwise.
+         */
+        public boolean handleFailedFetch(List<Integer> failedNodes, String storeName, Long storeVersion, String info) {
+            VAdminProto.HandleFetchFailureRequest handleFetchFailureRequest =
+                    VAdminProto.HandleFetchFailureRequest.newBuilder().setStoreName(storeName)
+                                                                      .setPushVersion(storeVersion)
+                                                                      .setInfo(info)
+                                                                      .addAllFailedNodes(failedNodes)
+                                                                      .build();
+
+            List<Integer> liveNodes = Lists.newArrayList(currentCluster.getNodeIds());
+            liveNodes.removeAll(failedNodes);
+            if(liveNodes.isEmpty()) {
+                return false;
+            }
+            int randomIndex = new Random().nextInt(liveNodes.size());
+            Integer randomNodeId = liveNodes.get(randomIndex);
+            Node randomNode = currentCluster.getNodeById(randomNodeId);
+
+            try {
+                VAdminProto.VoldemortAdminRequest adminRequest = VAdminProto.VoldemortAdminRequest.newBuilder()
+                        .setHandleFetchFailure(handleFetchFailureRequest)
+                        .setType(VAdminProto.AdminRequestType.HANDLE_FETCH_FAILURE)
+                        .build();
+
+                VAdminProto.HandleFetchFailureResponse response = rpcOps.sendAndReceive(randomNodeId,
+                        adminRequest,
+                        VAdminProto.HandleFetchFailureResponse.newBuilder()).build();
+
+                if (response.getSwapIsPossible()) {
+                    logger.info(randomNode.briefToString() +
+                            " returned successful HandleFetchFailureResponse: " + response.getInfo());
+                } else {
+                    logger.error(randomNode.briefToString() +
+                            " returned failed HandleFetchFailureResponse: " + response.getInfo());
+                }
+
+                for (VAdminProto.DisableStoreVersionResponse disableStoreVersionResponse: response.getDisableStoreResponsesList()) {
+                    Node node = currentCluster.getNodeById(disableStoreVersionResponse.getNodeId());
+                    String message = node.briefToString() + ": " + disableStoreVersionResponse.getInfo();
+                    if (disableStoreVersionResponse.getDisableSuccess()) {
+                        logger.info(message);
+                    } else {
+                        logger.error(message);
+                    }
+                }
+
+                return response.getSwapIsPossible();
+            } catch (UninitializedMessageException e) {
+                // Not printing out the exception in the logs as that is a benign error.
+                logger.error(randomNode.briefToString() + " does not support HA (introduced in release 1.9.20), so " +
+                        "pushHighAvailability will be DISABLED on cluster: " + currentCluster.getName());
+                return false;
+            } catch (Exception e) {
+                logger.error("Unexpected error while asking " + randomNode.briefToString() +
+                        " to HandleFetchFailureRequest.", e);
+                return false;
+            }
+        }
     }
 
     public class QuotaManagementOperations {
 
         public void setQuota(String storeName, String quotaTypeStr, String quotaValue) {
-            QuotaType quotaType = QuotaType.valueOf(quotaTypeStr);
-            if(quotaType != QuotaType.GET_THROUGHPUT && quotaType != QuotaType.PUT_THROUGHPUT) {
-                // TODO : Convert this to warning to exception once existing
-                // clients are upgraded. Probably around End of 2014.
-                logger.warn(" Quota only supports GET (Read) / PUT (Write) throughputs. Other throughput types are deprecated for easier use"
-                            + "StoreName: " + storeName + " QuotaType: " + quotaType);
+            QuotaType quotaType = null;
+            try {
+                quotaType = QuotaType.valueOf(quotaTypeStr);
+            } catch (IllegalArgumentException e) {
+                throw new VoldemortException("'" + quotaTypeStr + "' is not a supported quota type. " +
+                        "The following types are supported: " + Lists.newArrayList(QuotaType.values()), e);
             }
             // FIXME This is a temporary workaround for System store client not
             // being able to do a second insert. We simply generate a super
@@ -4157,7 +4312,7 @@ public class AdminClient {
                                                                            QuotaType.valueOf(quotaType)));
         }
 
-        public void setQuotaForNode(String storeName, QuotaType quotaType, Integer nodeId, Integer quota) {
+        public void setQuotaForNode(String storeName, QuotaType quotaType, Integer nodeId, Long quota) {
             try {
                 String quotaKey = QuotaUtils.makeQuotaKey(storeName, quotaType);
                 ByteArray keyArray = new ByteArray(quotaKey.getBytes("UTF8"));
@@ -4167,7 +4322,9 @@ public class AdminClient {
                                                                                              new Versioned<byte[]>(ByteUtils.getBytes(quota.toString(),
                                                                                                                                       "UTF8"),
                                                                                                                    clock));
-                storeOps.deleteNodeKeyValue(storeName, nodeId, keyArray);
+                storeOps.deleteNodeKeyValue(SystemStoreConstants.SystemStoreName.voldsys$_store_quotas.name(),
+                                            nodeId,
+                                            keyArray);
                 storeOps.putNodeKeyValue(SystemStoreConstants.SystemStoreName.voldsys$_store_quotas.name(),
                                          nodeKeyValue);
             } catch(UnsupportedEncodingException e) {

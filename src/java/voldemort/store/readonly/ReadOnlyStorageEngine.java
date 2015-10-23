@@ -35,7 +35,10 @@ import voldemort.VoldemortUnsupportedOperationalException;
 import voldemort.annotations.jmx.JmxGetter;
 import voldemort.annotations.jmx.JmxOperation;
 import voldemort.routing.RoutingStrategy;
+import voldemort.server.VoldemortConfig;
 import voldemort.store.AbstractStorageEngine;
+import voldemort.store.DisabledStoreException;
+import voldemort.store.StoreCapabilityType;
 import voldemort.store.StoreUtils;
 import voldemort.store.readonly.chunk.ChunkedFileSet;
 import voldemort.utils.ByteArray;
@@ -57,40 +60,18 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
 
     private static Logger logger = Logger.getLogger(ReadOnlyStorageEngine.class);
 
-    private final int numBackups, nodeId;
-    private long currentVersionId;
+    // Immutable state
+    private final int numBackups, nodeId, deleteBackupMs, maxValueBufferAllocationSize;
     private final File storeDir;
     private final ReadWriteLock fileModificationLock;
     private final SearchStrategy searchStrategy;
+    private final StoreVersionManager storeVersionManager;
+
+    // Mutable state
     private RoutingStrategy routingStrategy;
     private volatile ChunkedFileSet fileSet;
     private volatile boolean isOpen;
-    private int deleteBackupMs = 0;
     private long lastSwapped;
-    private boolean enforceMlock = false;
-
-    /**
-     * Create an instance of the store
-     * 
-     * @param name The name of the store
-     * @param searchStrategy The algorithm to use for searching for keys
-     * @param routingStrategy The routing strategy used to route keys
-     * @param nodeId Node id
-     * @param storeDir The directory in which the .data and .index files reside
-     * @param numBackups The number of backups of these files to retain
-     * @param deleteBackupMs The time in ms for which we'll wait before we
-     *        delete a backup
-     */
-    public ReadOnlyStorageEngine(String name,
-                                 SearchStrategy searchStrategy,
-                                 RoutingStrategy routingStrategy,
-                                 int nodeId,
-                                 File storeDir,
-                                 int numBackups,
-                                 int deleteBackupMs) {
-        this(name, searchStrategy, routingStrategy, nodeId, storeDir, numBackups);
-        this.deleteBackupMs = deleteBackupMs;
-    }
 
     /**
      * Create an instance of the store
@@ -108,11 +89,27 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
                                  int nodeId,
                                  File storeDir,
                                  int numBackups) {
-        this(name, searchStrategy, routingStrategy, nodeId, storeDir, numBackups, 0, false);
+        this(name,
+             searchStrategy,
+             routingStrategy,
+             nodeId,
+             storeDir,
+             numBackups,
+             0,
+             VoldemortConfig.DEFAULT_RO_MAX_VALUE_BUFFER_ALLOCATION_SIZE);
     }
 
-    /*
-     * Overload constructor to accept the mlock config
+    /**
+     * Create an instance of the store
+     *
+     * @param name The name of the store
+     * @param searchStrategy The algorithm to use for searching for keys
+     * @param routingStrategy The routing strategy used to route keys
+     * @param nodeId Node id
+     * @param storeDir The directory in which the .data and .index files reside
+     * @param numBackups The number of backups of these files to retain
+     * @param deleteBackupMs The time in ms for which we'll wait before we
+     *        delete a backup
      */
     public ReadOnlyStorageEngine(String name,
                                  SearchStrategy searchStrategy,
@@ -121,24 +118,34 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
                                  File storeDir,
                                  int numBackups,
                                  int deleteBackupMs,
-                                 boolean enforceMlock) {
+                                 int maxValueBufferAllocationSize) {
 
         super(name);
-        this.enforceMlock = enforceMlock;
+        this.deleteBackupMs = deleteBackupMs;
         this.storeDir = storeDir;
         this.numBackups = numBackups;
         this.searchStrategy = searchStrategy;
         this.routingStrategy = Utils.notNull(routingStrategy);
         this.nodeId = nodeId;
+        this.maxValueBufferAllocationSize = maxValueBufferAllocationSize;
         this.fileSet = null;
-        this.currentVersionId = 0L;
         /*
          * A lock that blocks reads during swap(), open(), and close()
          * operations
          */
         this.fileModificationLock = new ReentrantReadWriteLock();
         this.isOpen = false;
+        storeVersionManager = new StoreVersionManager(storeDir);
         open(null);
+    }
+
+    @Override
+    public Object getCapability(StoreCapabilityType storeCapabilityType) {
+        if (storeCapabilityType.equals(StoreCapabilityType.DISABLE_STORE_VERSION)) {
+            return storeVersionManager;
+        } else {
+            return super.getCapability(storeCapabilityType);
+        }
     }
 
     /**
@@ -193,15 +200,12 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
                 throw new VoldemortException("Unable to parse id from version directory "
                                              + versionDir.getAbsolutePath());
             }
-            currentVersionId = versionId;
             Utils.mkdirs(versionDir);
 
-            // Create symbolic link
-            logger.info("Creating symbolic link for '" + getName() + "' using directory "
-                        + versionDir.getAbsolutePath());
-            Utils.symlink(versionDir.getAbsolutePath(), storeDir.getAbsolutePath() + File.separator
-                                                        + "latest");
-            this.fileSet = new ChunkedFileSet(versionDir, routingStrategy, nodeId, enforceMlock);
+            // Validate symbolic link, and create it if it doesn't already exist
+            Utils.symlink(versionDir.getAbsolutePath(), storeDir.getAbsolutePath() + File.separator + "latest");
+            this.fileSet = new ChunkedFileSet(versionDir, routingStrategy, nodeId, maxValueBufferAllocationSize);
+            storeVersionManager.syncInternalStateFromFileSystem();
             this.lastSwapped = System.currentTimeMillis();
             this.isOpen = true;
         } catch(IOException e) {
@@ -229,7 +233,7 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
      */
     public String getCurrentDirPath() {
         return storeDir.getAbsolutePath() + File.separator + "version-"
-               + Long.toString(currentVersionId);
+               + Long.toString(getCurrentVersionId());
     }
 
     /**
@@ -238,7 +242,7 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
      * @return Returns a long indicating the version number
      */
     public long getCurrentVersionId() {
-        return currentVersionId;
+        return storeVersionManager.getCurrentVersion();
     }
 
     /**
@@ -367,7 +371,7 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
      * Delete all backups asynchronously
      */
     private void deleteBackups() {
-        File[] storeDirList = ReadOnlyUtils.getVersionDirs(storeDir, 0L, currentVersionId);
+        File[] storeDirList = ReadOnlyUtils.getVersionDirs(storeDir, 0L, getCurrentVersionId());
         if(storeDirList != null && storeDirList.length > (numBackups + 1)) {
             // delete ALL old directories asynchronously
             File[] extraBackups = ReadOnlyUtils.findKthVersionedDir(storeDirList,
@@ -404,8 +408,9 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
                     Utils.rm(file);
                     logger.info("Deleting of " + file.getAbsolutePath()
                                 + " completed successfully.");
+                    storeVersionManager.syncInternalStateFromFileSystem();
                 } catch(Exception e) {
-                    logger.error(e);
+                    logger.error("Exception during deleteAsync for path: " + file, e);
                 }
             }
         }, "background-file-delete").start();
@@ -508,6 +513,7 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
 
     @Override
     public List<Versioned<byte[]>> get(ByteArray key, byte[] transforms) throws VoldemortException {
+        checkStoreEnabled();
         StoreUtils.assertValidKey(key);
         try {
             fileModificationLock.readLock().lock();
@@ -538,6 +544,7 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
     public Map<ByteArray, List<Versioned<byte[]>>> getAll(Iterable<ByteArray> keys,
                                                           Map<ByteArray, byte[]> transforms)
             throws VoldemortException {
+        checkStoreEnabled();
         StoreUtils.assertValidKeys(keys);
         Map<ByteArray, List<Versioned<byte[]>>> results = StoreUtils.newEmptyHashMap(keys);
         try {
@@ -639,5 +646,12 @@ public class ReadOnlyStorageEngine extends AbstractStorageEngine<ByteArray, byte
     @Override
     public boolean isPartitionAware() {
         return true;
+    }
+
+    private void checkStoreEnabled() throws VoldemortException {
+        if (!storeVersionManager.isCurrentVersionEnabled()) {
+            throw new DisabledStoreException(
+                    "Store '" + getName() + "' version " + getCurrentVersionId() + " is disabled on this node.");
+        }
     }
 }

@@ -15,84 +15,82 @@ import org.apache.log4j.Logger;
  * pages, and closing all dependent resources.
  * 
  */
-public class MappedFileReader extends BaseMappedFile implements Closeable {
+public class MappedFileReader implements Closeable {
+
+    private Closer closer = new Closer();
+
+    private File file;
+
+    public File getFile() {
+        return file;
+    }
+
+    public boolean isClosed() {
+        return closer.isClosed();
+    }
+
+    @Override
+    public String toString() {
+        return file.toString();
+    }
 
     private static final Logger log = Logger.getLogger(MappedFileReader.class);
 
-    protected FileInputStream in;
+    private MappedByteBuffer mappedByteBuffer = null;
 
-    protected MappedByteBuffer mappedByteBuffer = null;
-
-    public MappedFileReader(String path) throws IOException {
-        this(new File(path));
-    }
-
-    public MappedFileReader(File file) throws IOException {
-
-        init(file);
-
-    }
-
-    private void init(File file) throws IOException {
-
+    public MappedFileReader(File file) {
         this.file = file;
-
-        this.in = new FileInputStream(file);
-        this.channel = in.getChannel();
-        this.fd = Native.getFd(in.getFD());
-
-        this.length = file.length();
-
     }
 
     /**
-     * Read from this mapped file.
+     * Return a new MappedByteBuffer which can be used to read
+     * data from the file.  If setAutoLock is true, attempt to
+     * lock the file's data in memory.  Calling map() multiple
+     * times returns the same MappedByteBuffer.
      */
-    public MappedByteBuffer map(boolean setAutoLock) throws IOException {
+    public MappedByteBuffer map() throws IOException {
 
+        long length = -1;
         try {
 
             if(mappedByteBuffer == null) {
-
-                if(setAutoLock) {
-                    closer.add(new MemLock(file, in.getFD(), offset, length));
-                }
-
-                mappedByteBuffer = channel.map(FileChannel.MapMode.READ_ONLY, offset, length);
+                /* Sample the file length just before we mmap() the
+                 * file, as it may have changed size since the ctor. We
+                 * do need to remember the exact length we mmap()ed for
+                 * later when we unmap() to avoid leaking mappings, but
+                 * MappedByteBuffer does that for us.
+                 */
+                length = file.length();
+                FileInputStream in = new FileInputStream(file);
+                FileChannel channel = in.getChannel();
+                mappedByteBuffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, length);
 
                 closer.add(new MappedByteBufferCloser(mappedByteBuffer));
 
+                /* On Unix-like systems we don't need to keep the file
+                 * descriptor around after we mmap()ed the file.  So
+                 * close it now. */
+                channel.close();
+                in.close();
             }
 
             return mappedByteBuffer;
 
         } catch(IOException e) {
+            log.error(String.format("Failed to map %s of length %,d",
+                                    file.getPath(), length), e);
 
-            log.error(String.format("Failed to map %s of length %,d at %,d",
-                                    file.getPath(),
-                                    length,
-                                    offset), e);
-
-            throw new IOException(String.format("Failed to map %s of length %,d at %,d",
+            throw new IOException(String.format("Failed to map %s of length %,d",
                                                 file.getPath(),
-                                                length,
-                                                offset), e);
-
+                                                length), e);
         }
-
     }
 
     @Override
     public void close() throws IOException {
-
         if(closer.isClosed())
             return;
-
-        closer.add(channel);
-        closer.add(in);
-
         closer.close();
-
     }
 
     /**
@@ -106,11 +104,7 @@ public class MappedFileReader extends BaseMappedFile implements Closeable {
 
         @Override
         public void close() throws IOException {
-
             super.close();
-
         }
-
     }
-
 }

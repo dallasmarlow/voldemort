@@ -27,7 +27,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -221,11 +220,27 @@ public class Props implements Map<String, String> {
             return defaultValue;
     }
 
+    /**
+     * @param name of the key to retrieve
+     * @return an int of the requested value
+     * @throws UndefinedPropertyException if the requested key is absent
+     */
     public int getInt(String name) {
         if(containsKey(name))
             return Integer.parseInt(get(name));
         else
             throw new UndefinedPropertyException(name);
+    }
+
+    /**
+     * @param name of the key to retrieve
+     * @return an Integer of the requested value, or null if absent
+     */
+    public Integer getNullableInt(String name) {
+        if(containsKey(name))
+            return Integer.parseInt(get(name));
+        else
+            return null;
     }
 
     public double getDouble(String name, double defaultValue) {
@@ -247,68 +262,6 @@ public class Props implements Map<String, String> {
             return getBytes(name);
         else
             return defaultValue;
-    }
-
-    /**
-     * Returns a list of strings with the comma as the separator of the value
-     *
-     * @param key
-     * @return
-     */
-    public List<String> getStringList(String key) {
-        return getStringList(key, "\\s*,\\s*");
-    }
-
-    /**
-     * Returns a list of strings with the sep as the separator of the value
-     *
-     * @param key
-     * @param sep
-     * @return
-     */
-    public List<String> getStringList(String key, String sep) {
-        String val = get(key);
-        if (val == null || val.trim().length() == 0) {
-            return Collections.emptyList();
-        }
-
-        if (containsKey(key)) {
-            return Arrays.asList(val.split(sep));
-        } else {
-            throw new UndefinedPropertyException("Missing required property '"
-                    + key + "'");
-        }
-    }
-
-    /**
-     * Returns a list of strings with the comma as the separator of the value.
-     * If the value is null, it'll return the defaultValue.
-     *
-     * @param key
-     * @return
-     */
-    public List<String> getStringList(String key, List<String> defaultValue) {
-        if (containsKey(key)) {
-            return getStringList(key);
-        } else {
-            return defaultValue;
-        }
-    }
-
-    /**
-     * Returns a list of strings with the sep as the separator of the value. If
-     * the value is null, it'll return the defaultValue.
-     *
-     * @param key
-     * @return
-     */
-    public List<String> getStringList(String key, List<String> defaultValue,
-                                      String sep) {
-        if (containsKey(key)) {
-            return getStringList(key, sep);
-        } else {
-            return defaultValue;
-        }
     }
 
     /**

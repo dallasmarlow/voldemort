@@ -25,8 +25,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 
 import org.apache.log4j.Level;
 
+import voldemort.common.nio.AbstractSelectorManager;
 import voldemort.common.nio.CommBufferSizeStats;
-import voldemort.common.nio.SelectorManager;
 import voldemort.server.protocol.RequestHandlerFactory;
 import voldemort.store.stats.Histogram;
 
@@ -91,7 +91,7 @@ import voldemort.store.stats.Histogram;
  * 
  */
 
-public class NioSelectorManager extends SelectorManager {
+public class NioSelectorManager extends AbstractSelectorManager {
 
     private final InetSocketAddress endpoint;
 
@@ -101,16 +101,22 @@ public class NioSelectorManager extends SelectorManager {
 
     private final int socketBufferSize;
 
+    private final boolean socketKeepAlive;
+
     private final NioSelectorManagerStats stats;
 
     public NioSelectorManager(InetSocketAddress endpoint,
                               RequestHandlerFactory requestHandlerFactory,
-                              int socketBufferSize) {
+                              int socketBufferSize,
+                              boolean socketKeepAlive,
+                              long maxHeartBeatTimeMs) {
+        super(maxHeartBeatTimeMs);
         this.endpoint = endpoint;
         this.socketChannelQueue = new ConcurrentLinkedQueue<SocketChannel>();
         this.requestHandlerFactory = requestHandlerFactory;
         this.socketBufferSize = socketBufferSize;
         this.stats = new NioSelectorManagerStats();
+        this.socketKeepAlive = socketKeepAlive;
     }
 
     public void accept(SocketChannel socketChannel) {
@@ -144,6 +150,7 @@ public class NioSelectorManager extends SelectorManager {
 
                     socketChannel.socket().setTcpNoDelay(true);
                     socketChannel.socket().setReuseAddress(true);
+                    socketChannel.socket().setKeepAlive(socketKeepAlive);
                     socketChannel.socket().setSendBufferSize(socketBufferSize);
 
                     if(socketChannel.socket().getReceiveBufferSize() != this.socketBufferSize)

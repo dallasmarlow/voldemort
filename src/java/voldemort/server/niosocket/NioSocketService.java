@@ -27,6 +27,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.commons.io.IOUtils;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 
@@ -72,25 +73,34 @@ public class NioSocketService extends AbstractSocketService {
 
     private final int socketBufferSize;
 
+    private final boolean socketKeepAlive;
+
     private final int acceptorBacklog;
 
     private final StatusManager statusManager;
 
     private final Thread acceptorThread;
-
     private final Logger logger = Logger.getLogger(getClass());
+    
+
+    private final long selectorMaxHeartBeatTimeMs;
 
     public NioSocketService(RequestHandlerFactory requestHandlerFactory,
                             int port,
                             int socketBufferSize,
+                            boolean socketKeepAlive,
                             int selectors,
                             String serviceName,
                             boolean enableJmx,
-                            int acceptorBacklog) {
+                            int acceptorBacklog,
+                            long selectorMaxHeartBeatTimeMs) {
+
         super(ServiceType.SOCKET, port, serviceName, enableJmx);
         this.requestHandlerFactory = requestHandlerFactory;
         this.socketBufferSize = socketBufferSize;
+        this.socketKeepAlive=socketKeepAlive;
         this.acceptorBacklog = acceptorBacklog;
+        this.selectorMaxHeartBeatTimeMs = selectorMaxHeartBeatTimeMs;
 
         try {
             this.serverSocketChannel = ServerSocketChannel.open();
@@ -124,7 +134,9 @@ public class NioSocketService extends AbstractSocketService {
             for(int i = 0; i < selectorManagers.length; i++) {
                 selectorManagers[i] = new NioSelectorManager(endpoint,
                                                              requestHandlerFactory,
-                                                             socketBufferSize);
+                                                             socketBufferSize,
+                                                             socketKeepAlive,
+                                                             selectorMaxHeartBeatTimeMs);
                 selectorManagerThreadPool.execute(selectorManagers[i]);
             }
 
@@ -234,30 +246,50 @@ public class NioSocketService extends AbstractSocketService {
                     break;
                 }
 
+                SocketChannel socketChannel = null;
                 try {
-                    SocketChannel socketChannel = serverSocketChannel.accept();
+                    socketChannel = serverSocketChannel.accept();
 
-                    if(socketChannel == null) {
-                        if(logger.isEnabledFor(Level.WARN))
+                    if (socketChannel == null) {
+                        if (logger.isEnabledFor(Level.WARN))
                             logger.warn("Claimed accept but nothing to select");
 
                         continue;
                     }
 
-                    NioSelectorManager selectorManager = selectorManagers[counter.getAndIncrement()
-                                                                          % selectorManagers.length];
-                    selectorManager.accept(socketChannel);
-                } catch(ClosedByInterruptException e) {
+                    int totalSelectors = selectorManagers.length;
+                    boolean isChannelRegistered = false;
+                    for (int i = 0; i < totalSelectors; i++) {
+                        NioSelectorManager selectorManager = selectorManagers[counter.getAndIncrement() % selectorManagers.length];
+                        if (selectorManager.isHealthy()) {
+                            selectorManager.accept(socketChannel);
+                            isChannelRegistered = true;
+                            break;
+                        }
+                    }
+                    if (isChannelRegistered == false) {
+                        // Channel was not registered with any selector.
+                        logger.error("No healthy selector could be found for channel " + socketChannel + " number of selectors "
+                                + totalSelectors + " closing the socket. ");
+                        IOUtils.closeQuietly(socketChannel);
+                    }
+                } catch (ClosedByInterruptException e) {
+                    if (socketChannel != null) {
+                        IOUtils.closeQuietly(socketChannel);
+                    }
                     // If you're *really* interested...
-                    if(logger.isTraceEnabled())
+                    if (logger.isTraceEnabled())
                         logger.trace("Acceptor thread interrupted, closing");
 
                     break;
-                } catch(Exception e) {
-                    if(logger.isEnabledFor(Level.WARN))
+                } catch (Exception e) {
+                    if (socketChannel != null) {
+                        IOUtils.closeQuietly(socketChannel);
+                    }
+                        if(logger.isEnabledFor(Level.WARN))
                         logger.warn(e.getMessage(), e);
+                    }
                 }
-            }
 
             if(logger.isInfoEnabled())
                 logger.info("Server has stopped listening for connections on port " + port);

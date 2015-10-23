@@ -52,11 +52,14 @@ import org.mortbay.jetty.EofException;
 import voldemort.TestUtils;
 import voldemort.VoldemortException;
 import voldemort.server.VoldemortConfig;
+import voldemort.server.protocol.admin.AsyncOperationStatus;
+import voldemort.store.quota.QuotaExceededException;
 import voldemort.store.readonly.ReadOnlyStorageFormat;
 import voldemort.store.readonly.ReadOnlyStorageMetadata;
 import voldemort.store.readonly.checksum.CheckSum;
 import voldemort.store.readonly.checksum.CheckSum.CheckSumType;
 import voldemort.store.readonly.checksum.CheckSumTests;
+import voldemort.store.readonly.swapper.InvalidBootstrapURLException;
 import voldemort.store.readonly.utils.ReadOnlyTestUtils;
 import voldemort.utils.Utils;
 
@@ -90,6 +93,22 @@ public class HdfsFetcherAdvancedTest {
         this.enableStatsFile = enableStatsFile;
     }
 
+    protected CheckSum copyFileWithCheckSumTest(HdfsFetcher fetcher,
+                                                FileSystem fs,
+                                                Path source,
+                                                File dest,
+                                                HdfsCopyStats stats,
+                                                CheckSumType checkSumType,
+                                                byte[] buffer) throws IOException {
+
+        FetchStrategy fetchStrategy =
+                new BasicFetchStrategy(fetcher, fs, stats, new AsyncOperationStatus(-1, "Bogus AsyncOp just for tests."), VoldemortConfig.DEFAULT_FETCHER_BUFFER_SIZE);
+        return fetchStrategy.fetch(new HdfsFile(fs.getFileStatus(source)),
+                dest,
+                checkSumType);
+    }
+
+
     public static File createTempDir() {
         return createTempDir(new File(System.getProperty("java.io.tmpdir")));
     }
@@ -101,7 +120,7 @@ public class HdfsFetcherAdvancedTest {
      * @return The temporary directory
      */
     public static File createTempDir(File parent) {
-        File temp = new File(parent, "hdfsfetchertestadvanced");
+        File temp = new File(parent, "hdfsfetchertestadvanced_" + System.currentTimeMillis());
         temp.delete();
         temp.mkdir();
         temp.deleteOnExit();
@@ -377,6 +396,138 @@ public class HdfsFetcherAdvancedTest {
     }
 
     @Test
+    public void testForDiskQuota() {
+
+        try {
+            // When disk quota is set to -1, no quota check should be performed
+            testForDiskQuota((int) VoldemortConfig.DEFAULT_STORAGE_SPACE_QUOTA_IN_KB, 2048);
+        } catch(Exception e) {
+            Assert.fail("testDiskForQuota(" + VoldemortConfig.DEFAULT_STORAGE_SPACE_QUOTA_IN_KB
+                        + ", 2048) failed with Exception: " + e);
+        }
+
+         boolean testhasErrors = false;
+         try {
+         // When disk quota is 0 expect InvalidBootsrapURLException. What this
+         // mean is no new stores will be onboarded on the fly during BnP
+         testForDiskQuota(0, 2048);
+         } catch(InvalidBootstrapURLException e) {
+         // This is expected
+         testhasErrors = true;
+         } catch(Exception e) {
+            Assert.fail("testForDiskQuota(0, 2048) failed with Exception: " + e);
+         }
+         if(!testhasErrors) {
+            Assert.fail("testForDiskQuota(0, 2048) should have failed with InvalidBootstrapURLException.");
+         }
+
+
+        testhasErrors = false;
+        try {
+        // Expect QuotaExceeded Exception when disk quota is less thatn data
+        // size
+        testForDiskQuota(2, 3000);
+        } catch(QuotaExceededException e) {
+        // This is expected
+        testhasErrors = true;
+        } catch(Exception e) {
+            Assert.fail("testForDiskQuota(2, 3000) failed with Exception: " + e);
+        }
+        if(!testhasErrors) {
+            Assert.fail("testForDiskQuota(2, 3000) should have failed with QuotaExceededException.");
+        }
+
+
+        try{
+        // When there is enough quota fetch succeeds.
+        testForDiskQuota(2, 1000);
+        }catch(Exception e){
+            Assert.fail("testForDiskQuota(2, 1000) failed with Exception: " + e);
+        }
+
+    }
+
+    private void testForDiskQuota(int diskQuotaInKB, int actualDataSizeInBytes) throws Exception {
+        cleanUp();
+        if(testSourceDir != null && testSourceDir.exists()){
+            deleteDir(testSourceDir);
+        }
+        testSourceDir = createTempDir();
+        File testUncompressedSourceDir = null;
+
+        int indexFileSize = actualDataSizeInBytes / 4;
+        int dataFileSize = actualDataSizeInBytes - indexFileSize;
+
+        // generate index , data and , metadata files
+        File indexFile = new File(testSourceDir, "0_0.index");
+        FileUtils.writeByteArrayToFile(indexFile, TestUtils.randomBytes(indexFileSize));
+        File dataFile = new File(testSourceDir, "0_0.data");
+        FileUtils.writeByteArrayToFile(dataFile, TestUtils.randomBytes(dataFileSize));
+        HdfsFetcher fetcher = new HdfsFetcher();
+        File metadataFile = new File(testSourceDir, ".metadata");
+        ReadOnlyStorageMetadata metadata = new ReadOnlyStorageMetadata();
+        metadata.add(ReadOnlyStorageMetadata.FORMAT, ReadOnlyStorageFormat.READONLY_V2.getCode());
+        metadata.add(ReadOnlyStorageMetadata.CHECKSUM_TYPE, CheckSum.toString(CheckSumType.MD5));
+        // Correct metadata checksum - MD5
+        byte[] computedCheksum = CheckSumTests.calculateCheckSum(testSourceDir.listFiles(),
+                                                                 CheckSumType.MD5);
+        metadata.add(ReadOnlyStorageMetadata.CHECKSUM, new String(Hex.encodeHex(computedCheksum)));
+        metadata.add(ReadOnlyStorageMetadata.DISK_SIZE_IN_BYTES,
+                     Integer.toString(actualDataSizeInBytes));
+        FileUtils.writeStringToFile(metadataFile, metadata.toJsonString());
+
+        /*
+         * if isCompressed == true replace .index and .data files with their
+         * compressed files before invoking fetch. Move the original
+         * uncompressed .index and .data files to a temporary location so they
+         * can be used later to check for data equality.
+         */
+        if(isCompressed) {
+            String destIndexPath = indexFile.getAbsolutePath() + ".gz";
+            gzipFile(indexFile.getAbsolutePath(), destIndexPath);
+            String destDataPath = dataFile.getAbsolutePath() + ".gz";
+            gzipFile(dataFile.getAbsolutePath(), destDataPath);
+
+            testUncompressedSourceDir = new File(testSourceDir.getAbsolutePath() + "-uncompressed");
+            testUncompressedSourceDir.delete();
+            testUncompressedSourceDir.mkdir();
+
+            if(!indexFile.renameTo(new File(testUncompressedSourceDir, indexFile.getName()))
+               || !dataFile.renameTo(new File(testUncompressedSourceDir, dataFile.getName()))) {
+                throw new Exception("cannot move irrelevant files");
+            }
+
+        }
+        testDestDir = new File(testSourceDir.getAbsolutePath() + "1");
+        if(testDestDir.exists()) {
+
+            deleteDir(testDestDir);
+        }
+
+        File fetchedFile = fetcher.fetch(testSourceDir.getAbsolutePath(),
+                                         testDestDir.getAbsolutePath(),
+                                         diskQuotaInKB);
+
+        assertNotNull(fetchedFile);
+        assertEquals(fetchedFile.getAbsolutePath(), testDestDir.getAbsolutePath());
+        if(isCompressed) {
+            for(File file: testUncompressedSourceDir.listFiles()) {
+                if(file.isFile()) {
+
+                    Assert.assertTrue(ReadOnlyTestUtils.areTwoBinaryFilesEqual(file,
+                                                                               new File(testDestDir,
+                                                                                        file.getName())));
+                }
+            }
+
+        }
+        if(testDestDir.exists()) {
+
+            deleteDir(testDestDir);
+        }
+    }
+
+    @Test
     public void testCompressionAndDecompression() throws Exception {
         File tempDir = createTempDir(new File("/tmp/bla-1"));
         indexFileName = "0_0.index";
@@ -405,10 +556,7 @@ public class HdfsFetcherAdvancedTest {
                .doAnswer(Mockito.CALLS_REAL_METHODS)
                .when(spyfs)
                .open(source);
-        Object[] params = { spyfs, source, copyLocation, stats, CheckSumType.MD5, buffer };
-        CheckSum ckSum = (CheckSum) this.invokePrivateMethod(fetcher,
-                                                             "copyFileWithCheckSumTest",
-                                                             params);
+        CheckSum ckSum = copyFileWithCheckSumTest(fetcher, spyfs, source, copyLocation, stats, CheckSumType.MD5, buffer);
         assertEquals(Arrays.equals(ckSum.getCheckSum(), checksumCalculated), true);
     }
 
@@ -431,12 +579,10 @@ public class HdfsFetcherAdvancedTest {
                .when(spyinput)
                .read();
         Mockito.doReturn(spyinput).doReturn(input).when(spyfs).open(source);
-        Object[] params = { spyfs, source, copyLocation, stats, CheckSumType.MD5, buffer };
 
         CheckSum ckSum = null;
         try {
-            ckSum = (CheckSum) this.invokePrivateMethod(fetcher, "copyFileWithCheckSumTest",
-                                                             params);
+            ckSum = copyFileWithCheckSumTest(fetcher, spyfs, source, copyLocation, stats, CheckSumType.MD5, buffer);
         } catch(Exception ex) {
             if(isCompressed) {
                 // This is expected
@@ -463,10 +609,7 @@ public class HdfsFetcherAdvancedTest {
                .doAnswer(Mockito.CALLS_REAL_METHODS)
                .when(spyfs)
                .open(source);
-        Object[] params = { spyfs, source, copyLocation, stats, CheckSumType.MD5, buffer };
-        CheckSum ckSum = (CheckSum) this.invokePrivateMethod(fetcher,
-                                                             "copyFileWithCheckSumTest",
-                                                             params);
+        CheckSum ckSum = copyFileWithCheckSumTest(fetcher, spyfs, source, copyLocation, stats, CheckSumType.MD5, buffer);
         assertEquals(Arrays.equals(ckSum.getCheckSum(), checksumCalculated), true);
     }
 

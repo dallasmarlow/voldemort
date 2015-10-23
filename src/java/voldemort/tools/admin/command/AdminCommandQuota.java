@@ -160,8 +160,6 @@ public class AdminCommandQuota extends AbstractAdminCommand {
          * Parses command-line and gets quota.
          * 
          * @param args Command-line input
-         * @param printHelp Tells whether to print help only or execute command
-         *        actually
          * @throws IOException
          * 
          */
@@ -194,7 +192,12 @@ public class AdminCommandQuota extends AbstractAdminCommand {
                                            AdminParserUtils.OPT_ALL_NODES);
 
             // load parameters
-            quotaTypes = AdminToolUtils.getQuotaTypes((List<String>) options.valuesOf(OPT_HEAD_QUOTA_GET));
+            try {
+                quotaTypes = AdminToolUtils.getQuotaTypes((List<String>) options.valuesOf(OPT_HEAD_QUOTA_GET));
+            } catch (VoldemortException e) {
+                printHelp(System.out);
+                throw e;
+            }
             storeNames = (List<String>) options.valuesOf(AdminParserUtils.OPT_STORE);
             url = (String) options.valueOf(AdminParserUtils.OPT_URL);
             allNodes = options.has(AdminParserUtils.OPT_ALL_NODES);
@@ -217,7 +220,8 @@ public class AdminCommandQuota extends AbstractAdminCommand {
          * 
          * @param adminClient An instance of AdminClient points to given cluster
          * @param storeNames List of stores to query quota
-         * @param quotaType List of quota types to fetch
+         * @param quotaTypes List of quota types to fetch
+         * @param nodeIds List of node IDs to fetch from
          */
         public static void doQuotaGet(AdminClient adminClient,
                                       List<String> storeNames,
@@ -317,8 +321,6 @@ public class AdminCommandQuota extends AbstractAdminCommand {
          * nodes.
          * 
          * @param args Command-line input
-         * @param printHelp Tells whether to print help only or execute command
-         *        actually
          * @throws IOException
          * 
          */
@@ -453,8 +455,6 @@ public class AdminCommandQuota extends AbstractAdminCommand {
          * Parses command-line and sets quota.
          * 
          * @param args Command-line input
-         * @param printHelp Tells whether to print help only or execute command
-         *        actually
          * @throws IOException
          * 
          */
@@ -488,10 +488,18 @@ public class AdminCommandQuota extends AbstractAdminCommand {
                                            AdminParserUtils.OPT_ALL_NODES);
 
             // load parameters
-            quota = AdminToolUtils.getValueList((List<String>) options.valuesOf(OPT_HEAD_QUOTA_SET),
-                                                "=");
+            try {
+                quota = AdminToolUtils.getValueList((List<String>) options.valuesOf(OPT_HEAD_QUOTA_SET), "=");
+            } catch (VoldemortException e) {
+                printHelp(System.out);
+                throw e;
+            }
             if(quota.size() % 2 != 0) {
+                printHelp(System.out);
                 throw new VoldemortException("Invalid quota type-value pair.");
+            } else if (quota.size() == 0) {
+                printHelp(System.out);
+                throw new VoldemortException("You must specify at least one type/value pair in order to set a quota.");
             }
             Set<String> validQuotaTypes = QuotaUtils.validQuotaTypes();
             for(Integer i = 0; i < quota.size(); i += 2) {
@@ -565,10 +573,11 @@ public class AdminCommandQuota extends AbstractAdminCommand {
                                 adminClient.quotaMgmtOps.setQuotaForNode(storeName,
                                                                          QuotaType.valueOf((String) entry.getKey()),
                                                                          nodeId,
-                                                                         Integer.parseInt((String) entry.getValue()));
+                                                                         Long.parseLong((String) entry.getValue()));
                             }
                         }
                     }
+                    System.out.println("Finished setting quota!");
                 } else {
                     System.err.println("Store " + storeName + " not in cluster.");
                 }
@@ -634,8 +643,6 @@ public class AdminCommandQuota extends AbstractAdminCommand {
          * Parses command-line and unsets quota.
          * 
          * @param args Command-line input
-         * @param printHelp Tells whether to print help only or execute command
-         *        actually
          * @throws IOException
          * 
          */
@@ -664,7 +671,12 @@ public class AdminCommandQuota extends AbstractAdminCommand {
             AdminParserUtils.checkRequired(options, AdminParserUtils.OPT_URL);
 
             // load parameters
-            quotaTypes = AdminToolUtils.getQuotaTypes((List<String>) options.valuesOf(OPT_HEAD_QUOTA_UNSET));
+            try {
+                quotaTypes = AdminToolUtils.getQuotaTypes((List<String>) options.valuesOf(OPT_HEAD_QUOTA_UNSET));
+            } catch (VoldemortException e) {
+                printHelp(System.out);
+                throw e;
+            }
             storeNames = (List<String>) options.valuesOf(AdminParserUtils.OPT_STORE);
             url = (String) options.valueOf(AdminParserUtils.OPT_URL);
             if(options.has(AdminParserUtils.OPT_CONFIRM)) {
@@ -709,6 +721,7 @@ public class AdminCommandQuota extends AbstractAdminCommand {
                     for(String quotaType: quotaTypes) {
                         adminClient.quotaMgmtOps.unsetQuota(storeName, quotaType);
                     }
+                    System.out.println("Finished unsetting quota!");
                 } else {
                     System.err.println("Store " + storeName + " not in cluster.");
                 }

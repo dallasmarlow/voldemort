@@ -24,6 +24,7 @@ public class ReadOnlyStorageMetadata {
     public final static String FORMAT = "format";
     public final static String CHECKSUM_TYPE = "checksum-type";
     public final static String CHECKSUM = "checksum";
+    public final static String DISK_SIZE_IN_BYTES = "disk_size_in_bytes";
 
     private Map<String, Object> properties;
 

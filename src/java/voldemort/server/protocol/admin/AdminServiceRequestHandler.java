@@ -1,13 +1,13 @@
 /*
- * 
+ *
  * Copyright 2008-2013 LinkedIn, Inc
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
  * the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
  * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
@@ -17,6 +17,7 @@
 
 package voldemort.server.protocol.admin;
 
+import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
@@ -26,13 +27,18 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.apache.commons.io.IOUtils;
 import org.apache.log4j.Logger;
 
 import voldemort.VoldemortException;
+import voldemort.client.ClientConfig;
 import voldemort.client.protocol.VoldemortFilter;
 import voldemort.client.protocol.admin.AdminClient;
+import voldemort.client.protocol.admin.AdminClientConfig;
 import voldemort.client.protocol.admin.filter.DefaultVoldemortFilter;
 import voldemort.client.protocol.pb.ProtoUtils;
 import voldemort.client.protocol.pb.VAdminProto;
@@ -56,29 +62,28 @@ import voldemort.server.storage.StorageService;
 import voldemort.server.storage.prunejob.VersionedPutPruneJob;
 import voldemort.server.storage.repairjob.RepairJob;
 import voldemort.store.ErrorCodeMapper;
+import voldemort.store.NoSuchCapabilityException;
+import voldemort.store.PersistenceFailureException;
 import voldemort.store.StorageEngine;
+import voldemort.store.StoreCapabilityType;
 import voldemort.store.StoreDefinition;
 import voldemort.store.StoreDefinitionBuilder;
 import voldemort.store.StoreOperationFailureException;
 import voldemort.store.backup.NativeBackupable;
 import voldemort.store.metadata.MetadataStore;
 import voldemort.store.mysql.MysqlStorageEngine;
+import voldemort.store.quota.QuotaType;
 import voldemort.store.readonly.FileFetcher;
 import voldemort.store.readonly.ReadOnlyStorageConfiguration;
 import voldemort.store.readonly.ReadOnlyStorageEngine;
 import voldemort.store.readonly.ReadOnlyUtils;
+import voldemort.store.readonly.StoreVersionManager;
 import voldemort.store.readonly.chunk.ChunkedFileSet;
+import voldemort.store.readonly.swapper.FailedFetchLock;
 import voldemort.store.slop.SlopStorageEngine;
 import voldemort.store.stats.StreamingStats;
 import voldemort.store.stats.StreamingStats.Operation;
-import voldemort.utils.ByteArray;
-import voldemort.utils.ByteUtils;
-import voldemort.utils.ClosableIterator;
-import voldemort.utils.EventThrottler;
-import voldemort.utils.NetworkClassLoader;
-import voldemort.utils.Pair;
-import voldemort.utils.ReflectUtils;
-import voldemort.utils.Utils;
+import voldemort.utils.*;
 import voldemort.versioning.ObsoleteVersionException;
 import voldemort.versioning.VectorClock;
 import voldemort.versioning.Versioned;
@@ -86,10 +91,13 @@ import voldemort.xml.ClusterMapper;
 import voldemort.xml.StoreDefinitionsMapper;
 
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
+import com.google.protobuf.Message;
+
 
 /**
  * Protocol buffers implementation of a {@link RequestHandler}
- * 
+ *
  */
 public class AdminServiceRequestHandler implements RequestHandler {
 
@@ -142,13 +150,8 @@ public class AdminServiceRequestHandler implements RequestHandler {
                     logger.info("Loading fetcher " + className);
                     Class<?> cls = Class.forName(className.trim());
                     this.fileFetcher = (FileFetcher) ReflectUtils.callConstructor(cls,
-                                                                                  new Class<?>[] {
-                                                                                          VoldemortConfig.class,
-                                                                                          storageService.getDynThrottleLimit()
-                                                                                                        .getClass() },
-                                                                                  new Object[] {
-                                                                                          voldemortConfig,
-                                                                                          storageService.getDynThrottleLimit() });
+                                                                                  new Class<?>[] { VoldemortConfig.class },
+                                                                                  new Object[] { voldemortConfig });
                 } catch(Exception e) {
                     throw new VoldemortException("Error loading file fetcher class " + className, e);
                 }
@@ -323,8 +326,20 @@ public class AdminServiceRequestHandler implements RequestHandler {
                 ProtoUtils.writeMessage(outputStream,
                                         handleReserveMemory(request.getReserveMemory()));
                 break;
+            case GET_HA_SETTINGS:
+                ProtoUtils.writeMessage(outputStream,
+                                        handleGetHighAvailabilitySettings(request.getGetHaSettings()));
+                break;
+            case DISABLE_STORE_VERSION:
+                ProtoUtils.writeMessage(outputStream,
+                                        handleDisableStoreVersion(request.getDisableStoreVersion()));
+                break;
+            case HANDLE_FETCH_FAILURE:
+                ProtoUtils.writeMessage(outputStream,
+                                        handleFetchFailure(request.getHandleFetchFailure()));
+                break;
             default:
-                throw new VoldemortException("Unkown operation " + request.getType());
+                throw new VoldemortException("Unknown operation: " + request.getType());
         }
 
         return null;
@@ -376,12 +391,11 @@ public class AdminServiceRequestHandler implements RequestHandler {
         try {
             Boolean setToOffline = request.getOfflineMode();
             logger.info("Setting OFFLINE_SERVER state to " + setToOffline.toString());
-            metadataStore.setOfflineState(setToOffline);
+
             if(setToOffline) {
-                server.stopOnlineServices();
+                server.goOffline();
             } else {
-                server.createOnlineServices();
-                server.startOnlineServices();
+                server.goOnline();
             }
             // TODO: deal with slop pushing here
         } catch(VoldemortException e) {
@@ -955,7 +969,7 @@ public class AdminServiceRequestHandler implements RequestHandler {
     /**
      * Given a read-only store name and a directory, swaps it in while returning
      * the directory path being swapped out
-     * 
+     *
      * @param storeName The name of the read-only store
      * @param directory The directory being swapped in
      * @return The directory path which was swapped out
@@ -1054,9 +1068,11 @@ public class AdminServiceRequestHandler implements RequestHandler {
                                                                                               storeDirList.length - 1)[0]);
                 }
                 pushVersion = maxVersion + 1;
+                logger.warn("Push Version is not specified, this might create issues during rebalance/restore. Store"
+                        + storeName + " Generated version " + pushVersion);
             }
 
-            asyncService.submitOperation(requestId, new AsyncOperation(requestId, "Fetch store") {
+            asyncService.submitOperation(requestId, new AsyncOperation(requestId, "Fetch store '" + storeName + "' v" + pushVersion) {
 
                 private String fetchDirPath = null;
 
@@ -1094,13 +1110,19 @@ public class AdminServiceRequestHandler implements RequestHandler {
                     } else {
 
                         logger.info("Started executing fetch of " + fetchUrl + " for RO store '"
-                                    + storeName + "'");
+                                + storeName + "' version " + pushVersion);
                         updateStatus("0 MB copied at 0 MB/sec - 0 % complete");
+
                         try {
-                            fileFetcher.setAsyncOperationStatus(status);
-                            fetchDir = fileFetcher.fetch(fetchUrl, store.getStoreDirPath()
-                                                                   + File.separator + "version-"
-                                                                   + Long.toString(pushVersion));
+
+                            String destinationDir = store.getStoreDirPath() + File.separator + "version-"
+                                            + Long.toString(pushVersion);
+                            fetchDir = fileFetcher.fetch(fetchUrl,
+                                                      destinationDir,
+                                                      status,
+                                                      storeName,
+                                                      pushVersion,
+                                                      metadataStore);
                             if(fetchDir == null) {
                                 String errorMessage = "File fetcher failed for "
                                                       + fetchUrl
@@ -1121,10 +1143,11 @@ public class AdminServiceRequestHandler implements RequestHandler {
                                                   + " and store '" + storeName + "' Reason: \n"
                                                   + ve.getMessage();
                             updateStatus(errorMessage);
-                            logger.error(errorMessage);
-                            throw new VoldemortException(errorMessage);
+                            logger.error(errorMessage, ve);
+                            throw ve;
                         } catch(Exception e) {
-                            throw new VoldemortException("Exception in Fetcher = " + e.getMessage());
+                            throw new VoldemortException("Exception in Fetcher = " + e.getMessage(),
+                                                         e);
                         }
 
                     }
@@ -1312,8 +1335,16 @@ public class AdminServiceRequestHandler implements RequestHandler {
             response.setComplete(requestComplete);
             response.setStatus(operationStatus.getStatus());
             response.setRequestId(requestId);
-            if(operationStatus.hasException())
-                throw new VoldemortException(operationStatus.getException());
+            if(operationStatus.hasException()) {
+                String erroMessage ="HandleAsyncStatus received Exception: "
+                                     + operationStatus.getException().getMessage();
+                Exception exception = operationStatus.getException();
+                if(exception instanceof VoldemortException) {
+                    throw (VoldemortException) exception;
+                } else {
+                    throw new VoldemortException(erroMessage, exception);
+                }
+            }
         } catch(VoldemortException e) {
             response.setError(ProtoUtils.encodeError(errorCodeMapper, e));
             logger.error("handleAsyncStatus failed for request(" + request.toString().trim() + ")",
@@ -1618,10 +1649,15 @@ public class AdminServiceRequestHandler implements RequestHandler {
             return response.build();
         }
 
+        AdminClient adminClient = null;
         try {
             // adding a store requires decoding the passed in store string
             StoreDefinitionsMapper mapper = new StoreDefinitionsMapper();
             StoreDefinition def = mapper.readStore(new StringReader(request.getStoreDefinition()));
+
+            adminClient = new AdminClient(metadataStore.getCluster(),
+                                          new AdminClientConfig(),
+                                          new ClientConfig());
 
             synchronized(lock) {
                 // only allow a single store to be created at a time. We'll see
@@ -1647,6 +1683,15 @@ public class AdminServiceRequestHandler implements RequestHandler {
                     // effect of updating the stores.xml file)
                     try {
                         metadataStore.addStoreDefinition(def);
+
+                        /*
+                         * set quota to a default value as specified in the
+                         * server configs
+                         */
+                        adminClient.quotaMgmtOps.setQuotaForNode(def.getName(),
+                                                                 QuotaType.STORAGE_SPACE,
+                                                                 metadataStore.getNodeId(),
+                                                                 voldemortConfig.getDefaultStorageSpaceQuotaInKB());
                     } catch(Exception e) {
                         // rollback open store operation
                         boolean isReadOnly = ReadOnlyStorageConfiguration.TYPE_NAME.equals(def.getType());
@@ -1665,6 +1710,10 @@ public class AdminServiceRequestHandler implements RequestHandler {
         } catch(VoldemortException e) {
             response.setError(ProtoUtils.encodeError(errorCodeMapper, e));
             logger.error("handleAddStore failed for request(" + request.toString() + ")", e);
+        } finally {
+            if(adminClient != null) {
+                IOUtils.closeQuietly(adminClient);
+            }
         }
 
         return response.build();
@@ -1676,7 +1725,7 @@ public class AdminServiceRequestHandler implements RequestHandler {
      * represents a complete request. Because the non-blocking code can by
      * definition not just block waiting for more data, it's possible to get
      * partial reads, and this identifies that case.
-     * 
+     *
      * @param buffer Buffer to check; the buffer is reset to position 0 before
      *        calling this method and the caller must reset it after the call
      *        returns
@@ -1890,4 +1939,187 @@ public class AdminServiceRequestHandler implements RequestHandler {
         }
         return response.build();
     }
+
+    private Message handleDisableStoreVersion(VAdminProto.DisableStoreVersionRequest disableStoreVersion) {
+        logger.info("Received DisableStoreVersionRequest: " + disableStoreVersion.toString());
+
+        VAdminProto.DisableStoreVersionResponse.Builder response = VAdminProto.DisableStoreVersionResponse.newBuilder();
+
+        response.setNodeId(server.getMetadataStore().getNodeId());
+
+        String storeName = disableStoreVersion.getStoreName();
+        Long version = disableStoreVersion.getPushVersion();
+
+        try {
+            StorageEngine storeToDisable = storeRepository.getStorageEngine(storeName);
+
+            if (storeToDisable == null) {
+                response.setDisableSuccess(false)
+                        .setInfo("The store '" + storeName + "' does not exist!");
+            } else {
+                StoreVersionManager storeVersionManager = (StoreVersionManager)
+                        storeToDisable.getCapability(StoreCapabilityType.DISABLE_STORE_VERSION);
+
+                storeVersionManager.disableStoreVersion(version);
+                response.setDisableSuccess(true)
+                        .setDisablePersistenceSuccess(true)
+                        .setInfo("The store '" + storeName + "' version " + version + " was successfully disabled.");
+            }
+        } catch (PersistenceFailureException e) {
+            response.setDisableSuccess(true)
+                    .setDisablePersistenceSuccess(false)
+                    .setInfo("The store '" + storeName + "' version " + version + " was disabled" +
+                            " but the change could not be persisted and will thus remain in effect only" +
+                            " until the next server restart. This is likely caused by the IO subsystem" +
+                            " becoming read-only.");
+        } catch (NoSuchCapabilityException e) {
+            response.setDisableSuccess(false)
+                    .setInfo("The store '" + storeName + "' does not support disabling versions!");
+        } catch (Exception e) {
+            logger.error("Got an unexpected exception while trying to disable store '" +
+                    storeName + "' version " + version + ".", e);
+            response.setDisableSuccess(false)
+                    .setInfo("The store '" + storeName + "' version " + version +
+                            " was not disabled because of an unexpected exception.");
+        }
+
+        logger.info("handleDisableStoreVersion returning response: " + response.getInfo());
+
+        if (response.getDisableSuccess()) {
+            // Then we also want to put the server in offline mode
+            VAdminProto.SetOfflineStateRequest offlineStateRequest =
+                    VAdminProto.SetOfflineStateRequest.newBuilder().setOfflineMode(true).build();
+            handleSetOfflineState(offlineStateRequest);
+        }
+
+        return response.build();
+    }
+
+    private Message handleGetHighAvailabilitySettings(VAdminProto.GetHighAvailabilitySettingsRequest getHaSettings) {
+        logger.info("Received GetHighAvailabilitySettingsRequest");
+
+        VAdminProto.GetHighAvailabilitySettingsResponse.Builder response =
+                VAdminProto.GetHighAvailabilitySettingsResponse.newBuilder();
+
+        boolean highAvailabilityPushEnabled = voldemortConfig.isHighAvailabilityPushEnabled();
+        response.setEnabled(highAvailabilityPushEnabled);
+        if (highAvailabilityPushEnabled) {
+            response.setClusterId(voldemortConfig.getHighAvailabilityPushClusterId());
+            response.setMaxNodeFailure(voldemortConfig.getHighAvailabilityPushMaxNodeFailures());
+            response.setLockPath(voldemortConfig.getHighAvailabilityPushLockPath());
+            response.setLockImplementation(voldemortConfig.getHighAvailabilityPushLockImplementation());
+        }
+
+        return response.build();
+    }
+
+    private Message handleFetchFailure(VAdminProto.HandleFetchFailureRequest handleFetchFailure) {
+        logger.info("Received HandleFetchFailureRequest");
+        VAdminProto.HandleFetchFailureResponse.Builder response =
+                VAdminProto.HandleFetchFailureResponse.newBuilder();
+
+        AdminClient adminClient = AdminClient.createTempAdminClient(voldemortConfig,
+                                                                    metadataStore.getCluster(),
+                                                                    1);
+
+        int maxNodeFailure = voldemortConfig.getHighAvailabilityPushMaxNodeFailures();
+        Set<Integer> nodesFailedInThisFetch = Sets.newHashSet(handleFetchFailure.getFailedNodesList());
+        int failureCount = nodesFailedInThisFetch.size();
+        boolean swapIsPossible = false;
+        String responseMessage = "";
+        if (failureCount > maxNodeFailure) {
+            // Too many nodes failed to tolerate this strategy... let's bail out.
+            responseMessage = "We cannot use pushHighAvailability because there is more than " + maxNodeFailure +
+                    " nodes that failed their fetches...";
+            logger.error(responseMessage);
+        } else {
+            String storeName = handleFetchFailure.getStoreName();
+            long pushVersion = handleFetchFailure.getPushVersion();
+            String extraInfo = handleFetchFailure.getInfo();
+
+            FailedFetchLock distributedLock = null;
+            try {
+                Class<? extends FailedFetchLock> failedFetchLockClass =
+                        (Class<? extends FailedFetchLock>) Class.forName(voldemortConfig.getHighAvailabilityPushLockImplementation());
+
+                // Extract properties coming from the remote BnP job...
+                Properties javaProperties = new Properties();
+                javaProperties.load(new ByteArrayInputStream(extraInfo.getBytes()));
+                Props props = new Props(javaProperties);
+
+                // Pass both server properties and the remote job's properties to the FailedFetchLock constructor
+                Object[] failedFetchLockParams = new Object[]{voldemortConfig, props};
+
+                distributedLock = ReflectUtils.callConstructor(failedFetchLockClass, failedFetchLockParams);
+
+                distributedLock.acquireLock();
+
+                Set<Integer> alreadyDisabledNodes = distributedLock.getDisabledNodes();
+
+                Set<Integer> allNodesToBeDisabled = Sets.newHashSet();
+                allNodesToBeDisabled.addAll(alreadyDisabledNodes);
+                allNodesToBeDisabled.addAll(nodesFailedInThisFetch);
+
+                if (allNodesToBeDisabled.size() > maxNodeFailure) {
+                    // Too many exceptions to tolerate this strategy... let's bail out.
+                    responseMessage = "We cannot use pushHighAvailability because it would bring the total number of " +
+                                         "nodes with disabled stores to more than " + maxNodeFailure + "...";
+                    logger.error(responseMessage);
+                } else {
+                    String nodesString = "node";
+                    if (nodesFailedInThisFetch.size() > 1) {
+                        // Good grammar is important son
+                        nodesString += "s";
+                    }
+                    nodesString += " [";
+                    boolean firstNode = true;
+                    for (Integer nodeId: nodesFailedInThisFetch) {
+                        logger.warn("Will disable store '" + storeName + "' on node " + nodeId);
+                        distributedLock.addDisabledNode(nodeId, storeName, pushVersion);
+                        if (firstNode) {
+                            firstNode = false;
+                        } else {
+                            nodesString += ", ";
+                        }
+                        nodesString += nodeId;
+                        response.addDisableStoreResponses(
+                                adminClient.readonlyOps.disableStoreVersion(nodeId, storeName, pushVersion, extraInfo));
+                    }
+                    nodesString += "]";
+                    swapIsPossible = true;
+                    responseMessage = "Swap will be possible even though " + nodesString + " failed to fetch.";
+                    logger.info(responseMessage);
+                }
+            } catch (ClassNotFoundException e) {
+                String logMessage = "Failed to find requested FailedFetchLock implementation while setting up pushHighAvailability. ";
+                logger.error(responseMessage, e);
+                responseMessage = logMessage + "\n" + ExceptionUtils.stackTraceToString(e);
+            } catch (Exception e) {
+                String logMessage = "Got exception while trying to execute pushHighAvailability. ";
+                logger.error(responseMessage, e);
+                responseMessage = logMessage + "\n" + ExceptionUtils.stackTraceToString(e);
+            } finally {
+                if (distributedLock != null) {
+                    try {
+                        distributedLock.releaseLock();
+                    } catch (Exception e) {
+                        logger.error("Error while trying to release the shared lock used for pushHighAvailability!", e);
+                    } finally {
+                        try {
+                            distributedLock.close();
+                        } catch (Exception inception) {
+                            logger.error("Error while trying to close the shared lock used for pushHighAvailability!",
+                                         inception);
+                        }
+                    }
+                }
+            }
+        }
+
+        response.setSwapIsPossible(swapIsPossible);
+        response.setInfo(responseMessage);
+
+        return response.build();
+    }
+
 }

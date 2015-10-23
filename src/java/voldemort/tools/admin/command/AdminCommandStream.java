@@ -33,6 +33,7 @@ import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintStream;
 import java.io.Writer;
+import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -41,6 +42,7 @@ import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 
 import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.util.Utf8;
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.JsonGenerator;
 import org.codehaus.jackson.map.ObjectMapper;
@@ -108,7 +110,7 @@ public class AdminCommandStream extends AbstractAdminCommand {
         stream.println();
         stream.println("To get more information on each command,");
         stream.println("please try \'help stream <command-name>\'.");
-        stream.println();
+        printDebugCommandWarning(stream);
     }
 
     /**
@@ -183,8 +185,8 @@ public class AdminCommandStream extends AbstractAdminCommand {
             stream.println("  stream fetch-entries -n <node-id>");
             stream.println("                       (-p <partition-id-list> | --all-partitions | --orphaned)");
             stream.println("                       (-s <store-name-list> | --all-stores) -u <url>");
-            stream.println("                       [-d <output-dir>] [--format json | hex]");
-            stream.println();
+            stream.println("                       [-d <output-dir>] [--format json | hex | binary]");
+            printDebugCommandWarning(stream);
             getParser().printHelpOn(stream);
             stream.println();
         }
@@ -193,13 +195,13 @@ public class AdminCommandStream extends AbstractAdminCommand {
          * Parses command-line and fetches entries from a given node.
          * 
          * @param args Command-line input
-         * @param printHelp Tells whether to print help only or execute command
-         *        actually
          * @throws IOException
          * 
          */
         @SuppressWarnings("unchecked")
         public static void executeCommand(String[] args) throws IOException {
+
+            printDebugCommandWarning(System.out);
 
             OptionParser parser = getParser();
 
@@ -284,6 +286,22 @@ public class AdminCommandStream extends AbstractAdminCommand {
                                  format);
         }
 
+        public static void writeObjectAsJson(BufferedWriter out,
+                                             Object object,
+                                             JsonGenerator generator)
+                throws IOException {
+            if(object instanceof GenericRecord) {
+                out.write(object.toString());
+            } else if(object instanceof Utf8) {
+                out.write(object.toString());
+            } else if(object instanceof ByteBuffer) {
+                ByteBuffer buffer = (ByteBuffer) object;
+                out.write(ByteUtils.toHexString(buffer.array()));
+            } else {
+                generator.writeObject(object);
+            }
+        }
+
         /**
          * Fetches entries from a given node.
          * 
@@ -363,7 +381,6 @@ public class AdminCommandStream extends AbstractAdminCommand {
                     }
 
                     writeAscii(outFile, new Writable() {
-
                         @Override
                         public void writeTo(BufferedWriter out) throws IOException {
 
@@ -378,17 +395,10 @@ public class AdminCommandStream extends AbstractAdminCommand {
                                                                                                           : keyCompressionStrategy.inflate(keyBytes));
                                 Object valueObject = valueSerializer.toObject((null == valueCompressionStrategy) ? valueBytes
                                                                                                                 : valueCompressionStrategy.inflate(valueBytes));
-                                if(keyObject instanceof GenericRecord) {
-                                    out.write(keyObject.toString());
-                                } else {
-                                    generator.writeObject(keyObject);
-                                }
+
+                                writeObjectAsJson(out, keyObject, generator);
                                 out.write(' ' + version.toString() + ' ');
-                                if(valueObject instanceof GenericRecord) {
-                                    out.write(valueObject.toString());
-                                } else {
-                                    generator.writeObject(valueObject);
-                                }
+                                writeObjectAsJson(out, valueObject, generator);
                                 out.write('\n');
                             }
                         }
@@ -410,6 +420,25 @@ public class AdminCommandStream extends AbstractAdminCommand {
                                 out.writeChars(",");
                                 out.writeChars(ByteUtils.toHexString(valueBytes));
                                 out.writeChars("\n");
+                            }
+                        }
+                    });
+                } else if(format.equals(AdminParserUtils.ARG_FORMAT_BINARY)) {
+                    writeBinary(outFile, new Printable() {
+
+                        @Override
+                        public void printTo(DataOutputStream out) throws IOException {
+                            while(entryIterator.hasNext()) {
+                                Pair<ByteArray, Versioned<byte[]>> kvPair = entryIterator.next();
+                                byte[] keyBytes = kvPair.getFirst().get();
+                                byte[] versionBytes = ((VectorClock) kvPair.getSecond().getVersion()).toBytes();
+                                byte[] valueBytes = kvPair.getSecond().getValue();
+                                out.writeInt(keyBytes.length);
+                                out.write(keyBytes);
+                                out.writeInt(versionBytes.length);
+                                out.write(versionBytes);
+                                out.writeInt(valueBytes.length);
+                                out.write(valueBytes);
                             }
                         }
                     });
@@ -476,8 +505,8 @@ public class AdminCommandStream extends AbstractAdminCommand {
             stream.println("  stream fetch-keys -n <node-id>");
             stream.println("                    (-p <partition-id-list> | --all-partitions | --orphaned)");
             stream.println("                    (-s <store-name-list> | --all-stores) -u <url>");
-            stream.println("                    [-d <output-dir>] [--format json | hex]");
-            stream.println();
+            stream.println("                    [-d <output-dir>] [--format json | hex | binary]");
+            printDebugCommandWarning(stream);
             getParser().printHelpOn(stream);
             stream.println();
         }
@@ -486,13 +515,13 @@ public class AdminCommandStream extends AbstractAdminCommand {
          * Parses command-line and fetches keys from a given node.
          * 
          * @param args Command-line input
-         * @param printHelp Tells whether to print help only or execute command
-         *        actually
          * @throws IOException
          * 
          */
         @SuppressWarnings("unchecked")
         public static void executeCommand(String[] args) throws IOException {
+
+            printDebugCommandWarning(System.out);
 
             OptionParser parser = getParser();
 
@@ -649,11 +678,9 @@ public class AdminCommandStream extends AbstractAdminCommand {
                                 Object keyObject = serializer.toObject((null == keysCompressionStrategy) ? keyBytes
                                                                                                         : keysCompressionStrategy.inflate(keyBytes));
 
-                                if(keyObject instanceof GenericRecord) {
-                                    out.write(keyObject.toString());
-                                } else {
-                                    generator.writeObject(keyObject);
-                                }
+                                SubCommandStreamFetchEntries.writeObjectAsJson(out,
+                                                                               keyObject,
+                                                                               generator);
                                 out.write('\n');
                             }
                         }
@@ -665,6 +692,19 @@ public class AdminCommandStream extends AbstractAdminCommand {
                         public void printTo(DataOutputStream out) throws IOException {
                             while(keyIterator.hasNext()) {
                                 byte[] keyBytes = keyIterator.next().get();
+                                out.writeChars(ByteUtils.toHexString(keyBytes) + "\n");
+                            }
+                        }
+                    });
+                } else if(format.equals(AdminParserUtils.ARG_FORMAT_BINARY)) {
+                    writeBinary(outFile, new Printable() {
+
+                        @Override
+                        public void printTo(DataOutputStream out) throws IOException {
+                            while(keyIterator.hasNext()) {
+                                byte[] keyBytes = keyIterator.next().get();
+                                out.writeInt(keyBytes.length);
+                                out.write(keyBytes);
                                 out.writeChars(ByteUtils.toHexString(keyBytes) + "\n");
                             }
                         }
@@ -741,7 +781,7 @@ public class AdminCommandStream extends AbstractAdminCommand {
             stream.println("  stream mirror --from-url <src-url> --from-node <src-node-id>");
             stream.println("                --to-url <dest-url> --to-node <dest-node-id>");
             stream.println("                (-s <store-name-list> | --all-stores) [--confirm]");
-            stream.println();
+            printDebugCommandWarning(stream);
             getParser().printHelpOn(stream);
             stream.println();
         }
@@ -750,13 +790,13 @@ public class AdminCommandStream extends AbstractAdminCommand {
          * Parses command-line and mirrors data from a node to another.
          * 
          * @param args Command-line input
-         * @param printHelp Tells whether to print help only or execute command
-         *        actually
          * @throws IOException
          * 
          */
         @SuppressWarnings("unchecked")
         public static void executeCommand(String[] args) throws IOException {
+
+            printDebugCommandWarning(System.out);
 
             OptionParser parser = getParser();
 
@@ -870,7 +910,7 @@ public class AdminCommandStream extends AbstractAdminCommand {
             stream.println("SYNOPSIS");
             stream.println("  stream update-entries -d <input-dir> -n <node-id> -u <url>");
             stream.println("                        [-s <store-name-list>] [--confirm]");
-            stream.println();
+            printDebugCommandWarning(stream);
             getParser().printHelpOn(stream);
             stream.println();
         }
@@ -879,13 +919,13 @@ public class AdminCommandStream extends AbstractAdminCommand {
          * Parses command-line and updates entries on a given node.
          * 
          * @param args Command-line input
-         * @param printHelp Tells whether to print help only or execute command
-         *        actually
          * @throws Exception
          * 
          */
         @SuppressWarnings("unchecked")
         public static void executeCommand(String[] args) throws Exception {
+
+            printDebugCommandWarning(System.out);
 
             OptionParser parser = getParser();
 

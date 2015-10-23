@@ -16,177 +16,121 @@
 
 package voldemort.store.readonly.mr.azkaban;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.hadoop.conf.Configuration;
+import azkaban.jobExecutor.AbstractJob;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.JobConf;
-
-import org.apache.log4j.Logger;
+import voldemort.VoldemortException;
 import voldemort.client.ClientConfig;
 import voldemort.client.protocol.admin.AdminClient;
 import voldemort.client.protocol.admin.AdminClientConfig;
 import voldemort.cluster.Cluster;
-import voldemort.store.readonly.mr.utils.HadoopUtils;
 import voldemort.store.readonly.swapper.AdminStoreSwapper;
-import azkaban.jobExecutor.AbstractJob;
-import voldemort.utils.Props;
+import voldemort.store.readonly.swapper.FailedFetchStrategy;
+import voldemort.utils.logging.PrefixedLogger;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /*
  * Call voldemort to swap the current store for the specified store
  */
 public class VoldemortSwapJob extends AbstractJob {
 
-    private final Props _props;
-    private VoldemortSwapConf swapConf;
-    private String hdfsFetcherProtocol;
-    private String hdfsFetcherPort;
+    // Immutable internal state
+    private final Cluster cluster;
+    private final String storeName;
+    private final int httpTimeoutMs;
+    private final int maxBackoffDelayMs;
+    private final boolean rollbackFailedSwap;
+    private final String hdfsFetcherProtocol;
+    private final String hdfsFetcherPort;
+    private final int maxNodeFailures;
+    private final List<FailedFetchStrategy> failedFetchStrategyList;
+    private final String dataDir;
+    private final String clusterName;
 
-    public VoldemortSwapJob(String id, Props props) throws IOException {
-        super(id, Logger.getLogger(VoldemortSwapJob.class.getName()));
-        _props = props;
+    // The following internal state mutates during run()
+    private long pushVersion;
 
-        this.hdfsFetcherProtocol = props.getString("voldemort.fetcher.protocol", "hftp");
-        this.hdfsFetcherPort = props.getString("voldemort.fetcher.port", "50070");
-        swapConf = new VoldemortSwapConf(_props);
-    }
-
-    public VoldemortSwapJob(String id, Props props, VoldemortSwapConf conf) throws IOException {
-        super(id, Logger.getLogger(VoldemortSwapJob.class.getName()));
-        _props = props;
-        this.hdfsFetcherProtocol = props.getString("voldemort.fetcher.protocol", "hftp");
-        this.hdfsFetcherPort = props.getString("voldemort.fetcher.port", "50070");
-        swapConf = conf;
-    }
-
-    public static final class VoldemortSwapConf {
-
-        private Cluster cluster;
-        private String dataDir;
-        private String storeName;
-        private int httpTimeoutMs;
-        private long pushVersion;
-        private int maxBackoffDelayMs = 60 * 1000;
-        private boolean rollback = false;
-
-        public VoldemortSwapConf(Props props) throws IOException {
-            this(HadoopUtils.readCluster(props.getString("cluster.xml"), new Configuration()),
-                 props.getString("data.dir"),
-                 props.get("store.name"),
-                 1000 * props.getInt("http.timeout.seconds", 24 * 60 * 60), // for
-                                                                            // backwards
-                 // compatibility
-                 // http timeout =
-                 // admin client
-                 // timeout
-                 props.getLong("push.version", -1L));
-        }
-
-        public VoldemortSwapConf(Cluster cluster,
-                                 String dataDir,
-                                 String storeName,
-                                 int httpTimeoutMs,
-                                 long pushVersion,
-                                 int maxBackoffDelayMs,
-                                 boolean rollback) {
-            this.cluster = cluster;
-            this.dataDir = dataDir;
-            this.storeName = storeName;
-            this.httpTimeoutMs = httpTimeoutMs;
-            this.pushVersion = pushVersion;
-            this.maxBackoffDelayMs = maxBackoffDelayMs;
-            this.rollback = rollback;
-        }
-
-        public VoldemortSwapConf(Cluster cluster,
-                                 String dataDir,
-                                 String storeName,
-                                 int httpTimeoutMs,
-                                 long pushVersion) {
-            this.cluster = cluster;
-            this.dataDir = dataDir;
-            this.storeName = storeName;
-            this.httpTimeoutMs = httpTimeoutMs;
-            this.pushVersion = pushVersion;
-        }
-
-        public Cluster getCluster() {
-            return cluster;
-        }
-
-        public String getDataDir() {
-            return dataDir;
-        }
-
-        public String getStoreName() {
-            return storeName;
-        }
-
-        public int getHttpTimeoutMs() {
-            return httpTimeoutMs;
-        }
-
-        public long getPushVersion() {
-            return pushVersion;
-        }
-
-        public int getMaxBackoffDelayMs() {
-            return maxBackoffDelayMs;
-        }
-
-        public boolean getRollback() {
-            return rollback;
-        }
+    public VoldemortSwapJob(String id,
+                            Cluster cluster,
+                            String dataDir,
+                            String storeName,
+                            int httpTimeoutMs,
+                            long pushVersion,
+                            int maxBackoffDelayMs,
+                            boolean rollbackFailedSwap,
+                            String hdfsFetcherProtocol,
+                            String hdfsFetcherPort,
+                            int maxNodeFailures,
+                            List<FailedFetchStrategy> failedFetchStrategyList,
+                            String clusterName) throws IOException {
+        super(id, PrefixedLogger.getLogger(AdminStoreSwapper.class.getName(), clusterName));
+        this.cluster = cluster;
+        this.dataDir = dataDir;
+        this.storeName = storeName;
+        this.httpTimeoutMs = httpTimeoutMs;
+        this.pushVersion = pushVersion;
+        this.maxBackoffDelayMs = maxBackoffDelayMs;
+        this.rollbackFailedSwap = rollbackFailedSwap;
+        this.hdfsFetcherProtocol = hdfsFetcherProtocol;
+        this.hdfsFetcherPort = hdfsFetcherPort;
+        this.maxNodeFailures = maxNodeFailures;
+        this.failedFetchStrategyList = failedFetchStrategyList;
+        this.clusterName = clusterName;
     }
 
     public void run() throws Exception {
-        String dataDir = swapConf.getDataDir();
-        String storeName = swapConf.getStoreName();
-        int httpTimeoutMs = swapConf.getHttpTimeoutMs();
-        long pushVersion = swapConf.getPushVersion();
-        Cluster cluster = swapConf.getCluster();
         ExecutorService executor = Executors.newCachedThreadPool();
 
         // Read the hadoop configuration settings
         JobConf conf = new JobConf();
         Path dataPath = new Path(dataDir);
-        dataDir = dataPath.makeQualified(FileSystem.get(conf)).toString();
+        String modifiedDataDir = dataPath.makeQualified(FileSystem.get(conf)).toString();
 
         /*
          * Replace the default protocol and port with the one derived as above
          */
-        String existingProtocol = "";
-        String existingPort = "";
-        String[] pathComponents = dataDir.split(":");
-        if(pathComponents.length >= 3) {
-            existingProtocol = pathComponents[0];
-            existingPort = pathComponents[2].split("/")[0];
+        String[] pathComponents = modifiedDataDir.split(":");
+        if (pathComponents.length >= 3) {
+            String existingProtocol = pathComponents[0];
+            String existingPort = pathComponents[2].split("/")[0];
+            info("Existing protocol = " + existingProtocol + " and port = " + existingPort);
+            if (hdfsFetcherProtocol.length() > 0 && hdfsFetcherPort.length() > 0) {
+                info("New protocol = " + hdfsFetcherProtocol + " and port = " + hdfsFetcherPort);
+                modifiedDataDir = modifiedDataDir.replaceFirst(existingProtocol, hdfsFetcherProtocol);
+                modifiedDataDir = modifiedDataDir.replaceFirst(existingPort, hdfsFetcherPort);
+            }
+        } else {
+            info("The dataDir will not be modified, since it does not contain the expected " +
+                    "structure of protocol:hostname:port/some_path");
         }
-        info("Existing protocol = " + existingProtocol + " and port = " + existingPort);
-        if(hdfsFetcherProtocol.length() > 0 && hdfsFetcherPort.length() > 0) {
-            dataDir = dataDir.replaceFirst(existingProtocol, this.hdfsFetcherProtocol);
-            dataDir = dataDir.replaceFirst(existingPort, this.hdfsFetcherPort);
+
+        try {
+            new Path(modifiedDataDir);
+        } catch (IllegalArgumentException e) {
+            throw new VoldemortException("Could not create a valid data path out of the supplied dataDir: " +
+                    dataDir, e);
         }
 
         // Create admin client
         AdminClient client = new AdminClient(cluster,
                                              new AdminClientConfig().setMaxConnectionsPerNode(cluster.getNumberOfNodes())
                                                                     .setAdminConnectionTimeoutSec(httpTimeoutMs / 1000)
-                                                                    .setMaxBackoffDelayMs(swapConf.getMaxBackoffDelayMs()),
+                                                                    .setMaxBackoffDelayMs(maxBackoffDelayMs),
                                              new ClientConfig());
 
-        if(pushVersion == -1L) {
-
+        if (pushVersion == -1L) {
             // Need to retrieve max version
             ArrayList<String> stores = new ArrayList<String>();
             stores.add(storeName);
-            Map<String, Long> pushVersions = client.readonlyOps.getROMaxVersion(stores);
+            Map<String, Long> pushVersions = client.readonlyOps.getROMaxVersion(stores, maxNodeFailures);
 
             if(pushVersions == null || !pushVersions.containsKey(storeName)) {
                 throw new RuntimeException("Push version could not be determined for store "
@@ -197,14 +141,16 @@ public class VoldemortSwapJob extends AbstractJob {
         }
 
         // do the swap
-        info("Initiating swap of " + storeName + " with dataDir:" + dataDir);
-        AdminStoreSwapper swapper = new AdminStoreSwapper(cluster,
-                                                          executor,
-                                                          client,
-                                                          httpTimeoutMs,
-                                                          swapConf.getRollback(),
-                                                          swapConf.getRollback());
-        swapper.swapStoreData(storeName, dataDir, pushVersion);
+        info("Initiating swap of " + storeName + " with dataDir: " + dataDir);
+        AdminStoreSwapper swapper = new AdminStoreSwapper(
+                cluster,
+                executor,
+                client,
+                httpTimeoutMs,
+                rollbackFailedSwap,
+                failedFetchStrategyList,
+                clusterName);
+        swapper.swapStoreData(storeName, modifiedDataDir, pushVersion);
         info("Swap complete.");
         executor.shutdownNow();
         executor.awaitTermination(10, TimeUnit.SECONDS);

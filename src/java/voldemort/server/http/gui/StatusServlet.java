@@ -39,8 +39,13 @@ import com.google.common.collect.Maps;
  * 
  * /server-status?action=reset&store=<storename> resets the stats for a given
  * store
- * 
+ *
+ * DEPRECATED: Do not use anymore. This class has logic duplicated from the
+ * {@link voldemort.server.protocol.admin.AdminServiceRequestHandler}. It has
+ * not been maintained properly.
+ *
  */
+@Deprecated
 public class StatusServlet extends HttpServlet {
 
     private static final long serialVersionUID = 1;
@@ -74,18 +79,6 @@ public class StatusServlet extends HttpServlet {
             throws ServletException, IOException {
 
         String storeName = request.getParameter("store");
-
-        // TODO: Shouldn't this be done through a POST?
-        if("reset".equals(request.getParameter("action"))) {
-            if(storeName != null) {
-                Store<ByteArray, byte[], byte[]> store = server.getStoreRepository()
-                                                               .getLocalStore(storeName);
-
-                if(store != null && store instanceof StatTrackingStore) {
-                    ((StatTrackingStore) store).resetStatistics();
-                }
-            }
-        }
 
         String format = request.getParameter("format");
         if("json".equals(format)) {

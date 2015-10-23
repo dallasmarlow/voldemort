@@ -21,10 +21,6 @@ public class mman {
     public static final int MAP_SHARED = 0x01; /* Share changes. */
     public static final int MAP_PRIVATE = 0x02; /* Changes are private. */
 
-    public static final int MAP_ALIGN = 0x200; /* addr specifies alignment */
-
-    public static final int MAP_LOCKED = 0x02000; /* Lock the mapping. */
-
     // http://linux.die.net/man/2/mmap
     // http://www.opengroup.org/sud/sud1/xsh/mmap.htm
     // http://linux.die.net/include/sys/mman.h
@@ -32,6 +28,11 @@ public class mman {
 
     // off_t = 8
     // size_t = 8
+    /**
+     * Map the given region of the given file descriptor into memory.
+     * Returns a Pointer to the newly mapped memory throws an
+     * IOException on error.
+     */
     public static Pointer mmap(long len, int prot, int flags, int fildes, long off)
             throws IOException {
 
@@ -48,12 +49,17 @@ public class mman {
         if(Pointer.nativeValue(result) == -1) {
             if(logger.isDebugEnabled())
                 logger.debug(errno.strerror());
+	    throw new IOException("mmap failed: " + errno.strerror());
         }
 
         return result;
 
     }
 
+    /**
+     * Unmap the given region.  Returns 0 on success or -1 (and sets
+     * errno) on failure.
+     */
     public static int munmap(Pointer addr, long len) throws IOException {
 
         int result = Delegate.munmap(addr, new NativeLong(len));
@@ -61,13 +67,17 @@ public class mman {
         if(result != 0) {
             if(logger.isDebugEnabled())
                 logger.debug(errno.strerror());
+	    throw new IOException("munmap failed: " + errno.strerror());
         }
 
         return result;
 
     }
 
-    public static void mlock(Pointer addr, long len) throws IOException {
+    /**
+     * Lock the given region.  Does not report failures.
+     */
+    public static void mlock(Pointer addr, long len) {
 
         int res = Delegate.mlock(addr, new NativeLong(len));
         if(res != 0) {
@@ -84,9 +94,9 @@ public class mman {
     }
 
     /**
-     * Unlock the given region, throw an IOException if we fail.
+     * Unlock the given region.  Does not report failures.
      */
-    public static void munlock(Pointer addr, long len) throws IOException {
+    public static void munlock(Pointer addr, long len) {
 
         if(Delegate.munlock(addr, new NativeLong(len)) != 0) {
             if(logger.isDebugEnabled())
@@ -129,7 +139,7 @@ public class mman {
             logger.debug("File descriptor is: " + fd);
 
         // mmap a large file...
-        Pointer addr = mmap(file.length(), PROT_READ, mman.MAP_SHARED | mman.MAP_ALIGN, fd, 0L);
+        Pointer addr = mmap(file.length(), PROT_READ, mman.MAP_SHARED, fd, 0L);
         if(logger.isDebugEnabled())
             logger.debug("mmap address is: " + Pointer.nativeValue(addr));
 

@@ -50,6 +50,7 @@ import voldemort.server.rebalance.Rebalancer;
 import voldemort.server.rebalance.RebalancerService;
 import voldemort.server.socket.SocketService;
 import voldemort.server.storage.StorageService;
+import voldemort.store.DisabledStoreException;
 import voldemort.store.configuration.ConfigurationStorageEngine;
 import voldemort.store.metadata.MetadataStore;
 import voldemort.utils.JNAUtils;
@@ -216,7 +217,7 @@ public class VoldemortServer extends AbstractService {
         onlineServices = Lists.newArrayList();
         if(voldemortConfig.isHttpServerEnabled()) {
             /*
-             * TODO REST-Server 1. Need to decide on replacing HttpService
+             * TODO: Get rid of HTTP Service.
              */
             HttpService httpService = new HttpService(this,
                                                       storageService,
@@ -244,10 +245,12 @@ public class VoldemortServer extends AbstractService {
                 NioSocketService nioSocketService = new NioSocketService(clientRequestHandlerFactory,
                                                                          identityNode.getSocketPort(),
                                                                          voldemortConfig.getSocketBufferSize(),
+                                                                         voldemortConfig.isNioConnectorKeepAlive(),
                                                                          voldemortConfig.getNioConnectorSelectors(),
                                                                          "nio-socket-server",
                                                                          voldemortConfig.isJmxEnabled(),
-                                                                         voldemortConfig.getNioAcceptorBacklog());
+                                                                         voldemortConfig.getNioAcceptorBacklog(),
+                                                                         voldemortConfig.getNioSelectorMaxHeartBeatTimeMs());
                 onlineServices.add(nioSocketService);
             } else {
                 logger.info("Using BIO Connector.");
@@ -304,10 +307,12 @@ public class VoldemortServer extends AbstractService {
                 services.add(new NioSocketService(adminRequestHandlerFactory,
                                                   identityNode.getAdminPort(),
                                                   voldemortConfig.getAdminSocketBufferSize(),
+                                                  voldemortConfig.isNioAdminConnectorKeepAlive(),
                                                   voldemortConfig.getNioAdminConnectorSelectors(),
                                                   "admin-server",
                                                   voldemortConfig.isJmxEnabled(),
-                                                  voldemortConfig.getNioAcceptorBacklog()));
+                                                  voldemortConfig.getNioAcceptorBacklog(),
+                                                  voldemortConfig.getNioSelectorMaxHeartBeatTimeMs()));
             } else {
                 logger.info("Using BIO Connector for Admin Service.");
                 services.add(new SocketService(adminRequestHandlerFactory,
@@ -332,7 +337,7 @@ public class VoldemortServer extends AbstractService {
         return ImmutableList.copyOf(services);
     }
 
-    public void startOnlineServices() {
+    private void startOnlineServices() {
         if(jmxService != null) {
             jmxService.registerServices(onlineServices);
         }
@@ -341,7 +346,7 @@ public class VoldemortServer extends AbstractService {
         }
     }
 
-    public List<VoldemortException> stopOnlineServices() {
+    private List<VoldemortException> stopOnlineServices() {
         List<VoldemortException> exceptions = Lists.newArrayList();
         for(VoldemortService service: Utils.reversed(onlineServices)) {
             try {
@@ -363,10 +368,20 @@ public class VoldemortServer extends AbstractService {
         JNAUtils.tryMlockall();
         logger.info("Starting " + basicServices.size() + " services.");
         long start = System.currentTimeMillis();
+        boolean goOnline = true;
         for(VoldemortService service: basicServices) {
-            service.start();
+            try {
+                service.start();
+            } catch (DisabledStoreException e) {
+                logger.error("Got a DisabledStoreException from " + service.getType().getDisplayName(), e);
+                goOnline = false;
+            }
         }
-        startOnlineServices();
+        if (goOnline) {
+            startOnlineServices();
+        } else {
+            goOffline();
+        }
         long end = System.currentTimeMillis();
         logger.info("Startup completed in " + (end - start) + " ms.");
     }
@@ -426,7 +441,7 @@ public class VoldemortServer extends AbstractService {
 
             @Override
             public void run() {
-                if(server.isStarted())
+                if (server.isStarted())
                     server.stop();
             }
         });
@@ -473,4 +488,14 @@ public class VoldemortServer extends AbstractService {
         }
     }
 
+    public void goOffline() {
+        getMetadataStore().setOfflineState(true);
+        stopOnlineServices();
+    }
+
+    public void goOnline() {
+        getMetadataStore().setOfflineState(false);
+        createOnlineServices();
+        startOnlineServices();
+    }
 }

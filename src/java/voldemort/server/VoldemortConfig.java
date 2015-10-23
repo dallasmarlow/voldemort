@@ -1,12 +1,12 @@
 /*
  * Copyright 2008-2012 LinkedIn, Inc
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
  * the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
  * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Properties;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.TimeUnit;
 
 import voldemort.client.ClientConfig;
 import voldemort.client.DefaultStoreClient;
@@ -80,14 +81,19 @@ public class VoldemortConfig implements Serializable {
     public static final long REPORTING_INTERVAL_BYTES = 25 * 1024 * 1024;
     public static final int DEFAULT_FETCHER_BUFFER_SIZE = 64 * 1024;
     public static final int DEFAULT_FETCHER_SOCKET_TIMEOUT = 1000 * 60 * 30; // 30 minutes
+    public static final int DEFAULT_FETCHER_THROTTLE_INTERVAL_WINDOW_MS = 1000;
 
+    // -1 represents no storage space quota constraint
+    public static final long DEFAULT_STORAGE_SPACE_QUOTA_IN_KB = -1L;
+    
     // Kerberos support for read-only fetches (constants)
     public static final String DEFAULT_KERBEROS_PRINCIPAL = "voldemrt";
     public static final String DEFAULT_KEYTAB_PATH = "/voldemrt.headless.keytab";
     private static final String DEFAULT_KERBEROS_KDC = "";
     private static final String DEFAULT_KERBEROS_REALM = "";
-    private static final String DEFAULT_FILE_FETCHER_CLASS = null;
+    private static final String DEFAULT_FILE_FETCHER_CLASS = null; // FIXME: Some unit tests fail without this default.
     private static final String DEFAULT_RO_COMPRESSION_CODEC = "NO_CODEC";
+    public static final int DEFAULT_RO_MAX_VALUE_BUFFER_ALLOCATION_SIZE = 25 * 1024 * 1024;
 
     private int nodeId;
     private String voldemortHome;
@@ -141,20 +147,27 @@ public class VoldemortConfig implements Serializable {
     private String rocksdbDataDirectory;
     private boolean rocksdbPrefixKeysWithPartitionId;
     private boolean rocksdbEnableReadLocks;
+    // Options prefixed with the following two values can be used to tune RocksDB performance and are passed directly
+    // to the RocksDB configuration code. See the RocksDB documentation for details:
+    //   https://github.com/facebook/rocksdb/blob/master/include/rocksdb/options.h
+    //   https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide
+    public static final String ROCKSDB_DB_OPTIONS = "rocksdb.db.options.";
+    public static final String ROCKSDB_CF_OPTIONS = "rocksdb.cf.options.";
 
     private int numReadOnlyVersions;
     private String readOnlyStorageDir;
     private String readOnlySearchStrategy;
     private int readOnlyDeleteBackupTimeMs;
     private long readOnlyFetcherMaxBytesPerSecond;
-    private long readOnlyFetcherMinBytesPerSecond;
     private long readOnlyFetcherReportingIntervalBytes;
+    private int readOnlyFetcherThrottlerInterval;
     private int readOnlyFetchRetryCount;
     private long readOnlyFetchRetryDelayMs;
     private int fetcherBufferSize;
     private int fetcherSocketTimeout;
     private String readOnlyKeytabPath;
     private String readOnlyKerberosUser;
+    public static final String HADOOP_CONFIG_PATH = "readonly.hadoop.config.path";
     private String hadoopConfigPath;
     private String readOnlyKerberosKdc;
     private String readOnlykerberosRealm;
@@ -162,9 +175,20 @@ public class VoldemortConfig implements Serializable {
     private String readOnlyCompressionCodec;
     private boolean readOnlyStatsFileEnabled;
     private int readOnlyMaxVersionsStatsFile;
+    private int readOnlyMaxValueBufferAllocationSize;
+    private long readOnlyLoginIntervalMs;
+    private long defaultStorageSpaceQuotaInKB;
 
-    // flag to indicate if we will mlock and pin index pages in memory
-    private boolean useMlock;
+    public static final String PUSH_HA_ENABLED = "push.ha.enabled";
+    private boolean highAvailabilityPushEnabled;
+    public static final String PUSH_HA_CLUSTER_ID = "push.ha.cluster.id";
+    private String highAvailabilityPushClusterId;
+    public static final String PUSH_HA_LOCK_PATH = "push.ha.lock.path";
+    private String highAvailabilityPushLockPath;
+    public static final String PUSH_HA_LOCK_IMPLEMENTATION = "push.ha.lock.implementation";
+    private String highAvailabilityPushLockImplementation;
+    public static final String PUSH_HA_MAX_NODE_FAILURES = "push.ha.max.node.failure";
+    private int highAvailabilityPushMaxNodeFailures;
 
     private OpTimeMap testingSlowQueueingDelays;
     private OpTimeMap testingSlowConcurrentDelays;
@@ -176,9 +200,12 @@ public class VoldemortConfig implements Serializable {
     private boolean socketKeepAlive;
 
     private boolean useNioConnector;
+    private boolean nioConnectorKeepAlive;
     private int nioConnectorSelectors;
     private int nioAdminConnectorSelectors;
+    private boolean nioAdminConnectorKeepAlive;
     private int nioAcceptorBacklog;
+    private long nioSelectorMaxHeartBeatTimeMs;
 
     private int clientSelectors;
     private TimeoutConfig clientTimeoutConfig;
@@ -338,11 +365,15 @@ public class VoldemortConfig implements Serializable {
                                                                              + "read-only");
         this.readOnlyDeleteBackupTimeMs = props.getInt("readonly.delete.backup.ms", 0);
         this.readOnlyFetcherMaxBytesPerSecond = props.getBytes("fetcher.max.bytes.per.sec", 0);
-        this.readOnlyFetcherMinBytesPerSecond = props.getBytes("fetcher.min.bytes.per.sec", 0);
         this.readOnlyFetcherReportingIntervalBytes = props.getBytes("fetcher.reporting.interval.bytes",
                                                                     REPORTING_INTERVAL_BYTES);
+        this.readOnlyFetcherThrottlerInterval = props.getInt("fetcher.throttler.interval",
+                                                             DEFAULT_FETCHER_THROTTLE_INTERVAL_WINDOW_MS);
         this.readOnlyFetchRetryCount = props.getInt("fetcher.retry.count", 5);
         this.readOnlyFetchRetryDelayMs = props.getLong("fetcher.retry.delay.ms", 5000);
+        this.readOnlyLoginIntervalMs = props.getLong("fetcher.login.interval.ms", -1);
+        this.defaultStorageSpaceQuotaInKB = props.getLong("default.storage.space.quota.in.kb",
+                                                          DEFAULT_STORAGE_SPACE_QUOTA_IN_KB);
         this.fetcherBufferSize = (int) props.getBytes("hdfs.fetcher.buffer.size",
                                                       DEFAULT_FETCHER_BUFFER_SIZE);
         this.fetcherSocketTimeout = props.getInt("hdfs.fetcher.socket.timeout",
@@ -352,7 +383,7 @@ public class VoldemortConfig implements Serializable {
                                                           + VoldemortConfig.DEFAULT_KEYTAB_PATH);
         this.readOnlyKerberosUser = props.getString("readonly.kerberos.user",
                                                     VoldemortConfig.DEFAULT_KERBEROS_PRINCIPAL);
-        this.setHadoopConfigPath(props.getString("readonly.hadoop.config.path",
+        this.hadoopConfigPath = (props.getString(VoldemortConfig.HADOOP_CONFIG_PATH,
                                                  this.metadataDirectory + "/hadoop-conf"));
         this.readOnlyKerberosKdc = props.getString("readonly.kerberos.kdc",
                                                    VoldemortConfig.DEFAULT_KERBEROS_KDC);
@@ -362,6 +393,8 @@ public class VoldemortConfig implements Serializable {
                                                 VoldemortConfig.DEFAULT_FILE_FETCHER_CLASS);
         this.readOnlyStatsFileEnabled = props.getBoolean("readonly.stats.file.enabled", true);
         this.readOnlyMaxVersionsStatsFile = props.getInt("readonly.stats.file.max.versions", 1000);
+        this.readOnlyMaxValueBufferAllocationSize = props.getInt("readonly.max.value.buffer.allocation.size",
+                                                                 VoldemortConfig.DEFAULT_RO_MAX_VALUE_BUFFER_ALLOCATION_SIZE);
 
         // To set the Voldemort RO server compression codec to GZIP, explicitly
         // set this
@@ -369,7 +402,11 @@ public class VoldemortConfig implements Serializable {
         this.readOnlyCompressionCodec = props.getString("readonly.compression.codec",
                                                         VoldemortConfig.DEFAULT_RO_COMPRESSION_CODEC);
 
-        this.setUseMlock(props.getBoolean("readonly.mlock.index", true));
+        this.highAvailabilityPushClusterId = props.getString(PUSH_HA_CLUSTER_ID, null);
+        this.highAvailabilityPushLockPath = props.getString(PUSH_HA_LOCK_PATH, null);
+        this.highAvailabilityPushLockImplementation = props.getString(PUSH_HA_LOCK_IMPLEMENTATION, null);
+        this.highAvailabilityPushMaxNodeFailures = props.getInt(PUSH_HA_MAX_NODE_FAILURES, 0);
+        this.highAvailabilityPushEnabled = props.getBoolean(PUSH_HA_ENABLED, false);
 
         this.mysqlUsername = props.getString("mysql.user", "root");
         this.mysqlPassword = props.getString("mysql.password", "");
@@ -427,14 +464,18 @@ public class VoldemortConfig implements Serializable {
         this.socketKeepAlive = props.getBoolean("socket.keepalive", false);
 
         this.useNioConnector = props.getBoolean("enable.nio.connector", true);
+        this.nioConnectorKeepAlive = props.getBoolean("nio.connector.keepalive", false);
         this.nioConnectorSelectors = props.getInt("nio.connector.selectors",
                                                   Math.max(8, Runtime.getRuntime()
                                                                      .availableProcessors()));
         this.nioAdminConnectorSelectors = props.getInt("nio.admin.connector.selectors",
                                                        Math.max(8, Runtime.getRuntime()
                                                                           .availableProcessors()));
+        this.nioAdminConnectorKeepAlive = props.getBoolean("nio.admin.connector.keepalive", false);
         // a value <= 0 forces the default to be used
         this.nioAcceptorBacklog = props.getInt("nio.acceptor.backlog", 256);
+        this.nioSelectorMaxHeartBeatTimeMs = props.getLong("nio.selector.max.heart.beat.time.ms", 
+                                                           TimeUnit.MILLISECONDS.convert(3, TimeUnit.MINUTES));
 
         this.clientSelectors = props.getInt("client.selectors", 4);
         this.clientMaxConnectionsPerNode = props.getInt("client.max.connections.per.node", 50);
@@ -462,7 +503,7 @@ public class VoldemortConfig implements Serializable {
         this.clientThreadIdleMs = props.getInt("client.thread.idle.ms", 100000);
         this.clientMaxQueuedRequests = props.getInt("client.max.queued.requests", 1000);
 
-        this.enableHttpServer = props.getBoolean("http.enable", true);
+        this.enableHttpServer = props.getBoolean("http.enable", false);
         this.enableSocketServer = props.getBoolean("socket.enable", true);
         this.enableAdminServer = props.getBoolean("admin.enable", true);
         this.enableJmx = props.getBoolean("jmx.enable", true);
@@ -635,6 +676,16 @@ public class VoldemortConfig implements Serializable {
             throw new ConfigurationException("rest.service.storage.thread.pool.queue.size cannot be negative.");
         if(maxHttpAggregatedContentLength <= 0)
             throw new ConfigurationException("max.http.aggregated.content.length must be positive");
+        if (this.highAvailabilityPushEnabled) {
+            if (this.highAvailabilityPushClusterId == null)
+                throw new ConfigurationException(PUSH_HA_CLUSTER_ID + " must be set if " + PUSH_HA_ENABLED + "=true");
+            if (this.highAvailabilityPushLockPath == null)
+                throw new ConfigurationException(PUSH_HA_LOCK_PATH + " must be set if " + PUSH_HA_ENABLED + "=true");
+            if (this.highAvailabilityPushLockImplementation == null)
+                throw new ConfigurationException(PUSH_HA_LOCK_IMPLEMENTATION + " must be set if " + PUSH_HA_ENABLED + "=true");
+            if (this.highAvailabilityPushMaxNodeFailures < 1)
+                throw new ConfigurationException(PUSH_HA_MAX_NODE_FAILURES + " must be 1 or more if " + PUSH_HA_ENABLED + "=true");
+        }
     }
 
     private int getIntEnvVariable(String name) {
@@ -1580,6 +1631,7 @@ public class VoldemortConfig implements Serializable {
         this.nioAdminConnectorSelectors = nioAdminConnectorSelectors;
     }
 
+    @Deprecated
     public boolean isHttpServerEnabled() {
         return enableHttpServer;
     }
@@ -1588,10 +1640,11 @@ public class VoldemortConfig implements Serializable {
      * Whether or not the {@link HttpService} is enabled
      * <ul>
      * <li>Property :"http.enable"</li>
-     * <li>Default :true</li>
+     * <li>Default :false</li>
      * </ul>
      * 
      */
+    @Deprecated
     public void setEnableHttpServer(boolean enableHttpServer) {
         this.enableHttpServer = enableHttpServer;
     }
@@ -2367,6 +2420,14 @@ public class VoldemortConfig implements Serializable {
         return nioAcceptorBacklog;
     }
 
+    public long getNioSelectorMaxHeartBeatTimeMs() {
+        return nioSelectorMaxHeartBeatTimeMs;
+    }
+
+    public void setNioSelectorMaxHeartBeatTimeMs(long nioSelectorMaxHeartBeatTimeMs) {
+        this.nioSelectorMaxHeartBeatTimeMs = nioSelectorMaxHeartBeatTimeMs;
+    }
+
     /**
      * Determines the size of the {@link NioSocketService}'s accept backlog
      * queue. A large enough backlog queue prevents connections from being
@@ -2783,7 +2844,7 @@ public class VoldemortConfig implements Serializable {
      * Global throttle limit for all hadoop fetches. New flows will dynamically
      * share bandwidth with existing flows, to respect this parameter at all
      * times.
-     * 
+     *
      * <ul>
      * <li>Property :"fetcher.max.bytes.per.sec"</li>
      * <li>Default :0, No throttling</li>
@@ -2793,22 +2854,22 @@ public class VoldemortConfig implements Serializable {
         this.readOnlyFetcherMaxBytesPerSecond = maxBytesPerSecond;
     }
 
-    public long getReadOnlyFetcherMinBytesPerSecond() {
-        return readOnlyFetcherMinBytesPerSecond;
+    public int getReadOnlyFetcherThrottlerInterval() {
+        return readOnlyFetcherThrottlerInterval;
     }
 
     /**
-     * Minimum amount of bandwidth that is guaranteed for any read only hadoop
-     * fetch.. New flows will be rejected if the server cannot guarantee this
-     * property for existing flows, if it accepts the new flow.
-     * 
+     * When measuring the download rate of HDFS fetches, this parameter defines
+     * the length in milliseconds of the two rolling windows. This is an
+     * implementation detail which should typically not require any change.
+     *
      * <ul>
-     * <li>Property :"fetcher.min.bytes.per.sec"</li>
-     * <li>Default :0, no lower limit</li>
+     * <li>Property :"fetcher.throttler.interval"</li>
+     * <li>Default : 1000 ms</li>
      * </ul>
      */
-    public void setReadOnlyFetcherMinBytesPerSecond(long minBytesPerSecond) {
-        this.readOnlyFetcherMinBytesPerSecond = minBytesPerSecond;
+    public void setReadOnlyFetcherThrottlerInterval(int throttlerInterval) {
+        this.readOnlyFetcherThrottlerInterval = throttlerInterval;
     }
 
     public long getReadOnlyFetcherReportingIntervalBytes() {
@@ -2849,9 +2910,9 @@ public class VoldemortConfig implements Serializable {
     }
 
     /**
-     * Amount of delay in ms between readonly fetcher retries, to fetch data
-     * from Hadoop
-     * 
+     * Minimum delay in ms between readonly fetcher retries, to fetch data
+     * from Hadoop. The maximum delay is 2x this amount, determined randomly.
+     *
      * <ul>
      * <li>Property :"fetcher.retry.delay.ms"</li>
      * <li>Default :5000 (5 seconds)</li>
@@ -2859,6 +2920,50 @@ public class VoldemortConfig implements Serializable {
      */
     public void setReadOnlyFetchRetryDelayMs(long readOnlyFetchRetryDelayMs) {
         this.readOnlyFetchRetryDelayMs = readOnlyFetchRetryDelayMs;
+    }
+
+    public long getReadOnlyLoginIntervalMs() {
+        return readOnlyLoginIntervalMs;
+    }
+
+    /**
+     * Minimum elapsed interval between HDFS logins. Setting this to a positive value
+     * attempts to re-use HDFS authentication tokens across fetches, in order to
+     * minimize load on KDC infrastructure.
+     *
+     * Setting this to -1 (which is the default) forces re-logging in every time.
+     *
+     * FIXME: Concurrent fetches sharing the same authentication token seem to clear each others' state,
+     *        which prevents the later fetch from completing successfully.
+     *
+     * <ul>
+     * <li>Property :"fetcher.login.interval.ms"</li>
+     * <li>Default : -1</li>
+     * </ul>
+     */
+    public void setReadOnlyLoginIntervalMs(long readOnlyLoginIntervalMs) {
+        this.readOnlyLoginIntervalMs = readOnlyLoginIntervalMs;
+    }
+
+    public long getDefaultStorageSpaceQuotaInKB() {
+        return defaultStorageSpaceQuotaInKB;
+    }
+
+    /**
+     * Default storage space quota size in KB to be used for new stores that are
+     * automatically created via Build And Push flow.
+     * 
+     * Setting this to -1 (which is the default) indicates no restriction in
+     * disk quota and will continue to work the same way as if there were no
+     * storage space quota.
+     *  
+     * <ul>
+     * <li>Property :"default.storage.space.quota.in.kb"</li>
+     * <li>Default : -1</li>
+     * </ul>
+     */
+    public void setDefaultStorageSpaceQuotaInKB(long defaultStorageSpaceQuotaInKB) {
+        this.defaultStorageSpaceQuotaInKB = defaultStorageSpaceQuotaInKB;
     }
 
     public int getFetcherBufferSize() {
@@ -2907,6 +3012,106 @@ public class VoldemortConfig implements Serializable {
      */
     public void setReadOnlySearchStrategy(String readOnlySearchStrategy) {
         this.readOnlySearchStrategy = readOnlySearchStrategy;
+    }
+
+    public boolean isHighAvailabilityPushEnabled() {
+        return highAvailabilityPushEnabled;
+    }
+
+    /**
+     * Sets whether a high-availability strategy is to be used while pushing whole
+     * data sets (such as when bulk loading Read-Only stores).
+     *
+     * <ul>
+     * <li>Property : "push.ha.enabled"</li>
+     * <li>Default : false</li>
+     * </ul>
+     */
+    public void setHighAvailabilityPushEnabled(boolean highAvailabilityPushEnabled) {
+        this.highAvailabilityPushEnabled = highAvailabilityPushEnabled;
+    }
+
+    public String getHighAvailabilityPushClusterId() {
+        return highAvailabilityPushClusterId;
+    }
+
+    /**
+     * When using a high-availability push strategy, the cluster ID uniquely
+     * identifies the failure domain within which nodes can fail.
+     *
+     * Clusters containing the same stores but located in different data centers
+     * should have different cluster IDs.
+     *
+     * <ul>
+     * <li>Property : "push.ha.cluster.id"</li>
+     * <li>Default : null</li>
+     * </ul>
+     */
+    public void setHighAvailabilityPushClusterId(String highAvailabilityPushClusterId) {
+        this.highAvailabilityPushClusterId = highAvailabilityPushClusterId;
+    }
+
+    public int getHighAvailabilityPushMaxNodeFailures() {
+        return highAvailabilityPushMaxNodeFailures;
+    }
+
+    /**
+     * When using a high-availability push strategy, there is a maximum amount of nodes
+     * which can be allowed to have failed ingesting new data within a single failure
+     * domain (which is identified by "push.ha.cluster.id").
+     *
+     * This should be set to a number which is equal or less than the lowest replication
+     * factor across all stores hosted in the cluster.
+     *
+     * <ul>
+     * <li>Property : "push.ha.max.node.failure"</li>
+     * <li>Default : 0</li>
+     * </ul>
+     */
+    public void setHighAvailabilityPushMaxNodeFailures(int highAvailabilityPushMaxNodeFailures) {
+        this.highAvailabilityPushMaxNodeFailures = highAvailabilityPushMaxNodeFailures;
+    }
+
+    public String getHighAvailabilityPushLockPath() {
+        return highAvailabilityPushLockPath;
+    }
+
+    /**
+     * When using a high-availability push strategy, there is a certain path which is
+     * used as a central lock in order to make sure we do not have disabled stores on
+     * more nodes than specified by "push.ha.max.node.failure".
+     *
+     * At the moment, only an HDFS path is supported, but this could be extended to
+     * support a ZK path, or maybe a shared mounted file-system path.
+     *
+     * <ul>
+     * <li>Property : "push.ha.lock.path"</li>
+     * <li>Default : null</li>
+     * </ul>
+     */
+    public void setHighAvailabilityPushLockPath(String highAvailabilityPushLockPath) {
+        this.highAvailabilityPushLockPath = highAvailabilityPushLockPath;
+    }
+
+    public String getHighAvailabilityPushLockImplementation() {
+        return highAvailabilityPushLockImplementation;
+    }
+
+    /**
+     * When using a high-availability push strategy, there needs to be a central lock 
+     * in order to make sure we do not have disabled stores on more nodes than specified 
+     * by "push.ha.max.node.failure".
+     *
+     * At the moment, only HDFS is supported as a locking mechanism, but this could be 
+     * extended to support ZK, or maybe a shared mounted file-system.
+     *
+     * <ul>
+     * <li>Property : "push.ha.lock.implementation"</li>
+     * <li>Default : null</li>
+     * </ul>
+     */
+    public void setHighAvailabilityPushLockImplementation(String highAvailabilityPushLockImplementation) {
+        this.highAvailabilityPushLockImplementation = highAvailabilityPushLockImplementation;
     }
 
     public boolean isNetworkClassLoaderEnabled() {
@@ -3036,25 +3241,6 @@ public class VoldemortConfig implements Serializable {
         return this.testingSlowConcurrentDelays;
     }
 
-    public boolean isUseMlock() {
-        return useMlock;
-    }
-
-    /**
-     * If true, the server will mlock read-only index files and pin them to
-     * memory. This might help in controlling thrashing of index pages.
-     * 
-     * <ul>
-     * <li>Property : "readonly.mlock.index"</li>
-     * <li>Default " true</li>
-     * </ul>
-     * 
-     * @param useMlock
-     */
-    public void setUseMlock(boolean useMlock) {
-        this.useMlock = useMlock;
-    }
-
     public int getGossipInterval() {
         return gossipIntervalMs;
     }
@@ -3163,6 +3349,7 @@ public class VoldemortConfig implements Serializable {
         this.restServiceStorageThreadPoolQueueSize = restServiceStorageThreadPoolQueueSize;
     }
 
+    @Deprecated
     public int getMaxHttpAggregatedContentLength() {
         return maxHttpAggregatedContentLength;
     }
@@ -3174,6 +3361,7 @@ public class VoldemortConfig implements Serializable {
      * <li>Default : 1048576</li>
      * </ul>
      */
+    @Deprecated
     public void setMaxHttpAggregatedContentLength(int maxHttpAggregatedContentLength) {
         this.maxHttpAggregatedContentLength = maxHttpAggregatedContentLength;
     }
@@ -3294,6 +3482,30 @@ public class VoldemortConfig implements Serializable {
         this.readOnlyMaxVersionsStatsFile = readOnlyMaxVersionsStatsFile;
     }
 
+    public int getReadOnlyMaxValueBufferAllocationSize() {
+        return readOnlyMaxValueBufferAllocationSize;
+    }
+
+    /**
+     * Internal safe guard to avoid GC (and possibly OOM) from excessive buffer allocation.
+     *
+     * More importantly, if the server is given corrupted (or mismatched) index/data Read-Only files,
+     * it could be the case that the server accidentally attempts to read abnormally large values.
+     *
+     * Large value sizes are not good use cases for Voldemort so this should theoretically never come
+     * into play. The default config value is already absurdly high, and should thus never need to be raised.
+     *
+     * <ul>
+     * <li>Property : "readonly.max.value.buffer.allocation.size"</li>
+     * <li>Default : 25 MB</li>
+     * </ul>
+     *
+     * @param readOnlyMaxValueBufferAllocationSize
+     */
+    public void setReadOnlyMaxValueBufferAllocationSize(int readOnlyMaxValueBufferAllocationSize) {
+        this.readOnlyMaxValueBufferAllocationSize = readOnlyMaxValueBufferAllocationSize;
+    }
+
     public String getReadOnlyCompressionCodec() {
         return this.readOnlyCompressionCodec;
     }
@@ -3357,6 +3569,40 @@ public class VoldemortConfig implements Serializable {
      */
     public void setRocksdbEnableReadLocks(boolean rocksdbEnableReadLocks) {
         this.rocksdbEnableReadLocks = rocksdbEnableReadLocks;
+    }
+
+    /**
+     * If set to true client connections to the nio admin server will have SO_KEEPALIVE on,
+     * to tell OS to close dead client connections
+     * <ul>
+     * <li>Property :"nio.admin.connector.keepalive"</li>
+     * <li>Default : "false"</li>
+     * </ul>
+     * @param nioAdminConnectorKeepAlive
+     */
+    public void setNioAdminConnectorKeepAlive(boolean nioAdminConnectorKeepAlive) {
+        this.nioAdminConnectorKeepAlive = nioAdminConnectorKeepAlive;
+    }
+    public boolean isNioAdminConnectorKeepAlive() {
+        return nioAdminConnectorKeepAlive;
+    }
+
+    /**
+     * If set to true client connections to the server will have SO_KEEPALIVE on,
+     * to tell OS to close dead client connections
+     * <ul>
+     * <li>Property :"nio.connector.keepalive"</li>
+     * <li>Default : "false"</li>
+     * </ul>
+     *
+     * @param nioConnectorKeepAlive
+     */
+    public void setNioConnectorKeepAlive(boolean nioConnectorKeepAlive) {
+        this.nioConnectorKeepAlive = nioConnectorKeepAlive;
+    }
+
+    public boolean isNioConnectorKeepAlive() {
+        return nioConnectorKeepAlive;
     }
 
 }

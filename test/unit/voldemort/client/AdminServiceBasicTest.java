@@ -2512,15 +2512,21 @@ public class AdminServiceBasicTest {
 
     @Test
     public void testQuotaOpsForNode() throws InterruptedException {
+        QuotaType[] quotaTypes = QuotaType.values();
+        for(int i = 0; i < quotaTypes.length ; i++){
+            testQuotaOpsForNode(quotaTypes[i]);
+        }
+    }
+
+    public void testQuotaOpsForNode(QuotaType quotaType) throws InterruptedException {
         AdminClient client = getAdminClient();
         String storeName = storeDefs.get(0).getName();
-        QuotaType quotaType = QuotaType.GET_THROUGHPUT;
         Integer nodeId = 0;
-        Integer quota = 1000;
+        Long quota = 1000L;
 
         // test set quota
         client.quotaMgmtOps.setQuotaForNode(storeName, quotaType, nodeId, quota);
-        Integer getQuota = Integer.parseInt(client.quotaMgmtOps.getQuotaForNode(storeName,
+        Long getQuota = Long.parseLong(client.quotaMgmtOps.getQuotaForNode(storeName,
                                                                                 quotaType,
                                                                                 nodeId).getValue());
         assertEquals(quota, getQuota);
@@ -2530,9 +2536,9 @@ public class AdminServiceBasicTest {
         Thread.sleep(5);
 
         // test reset quota
-        quota = 10;
+        quota = 10L;
         client.quotaMgmtOps.setQuotaForNode(storeName, quotaType, nodeId, quota);
-        getQuota = Integer.parseInt(client.quotaMgmtOps.getQuotaForNode(storeName,
+        getQuota = Long.parseLong(client.quotaMgmtOps.getQuotaForNode(storeName,
                                                                         quotaType,
                                                                         nodeId).getValue());
         assertEquals(quota, getQuota);
@@ -2553,7 +2559,7 @@ public class AdminServiceBasicTest {
         AdminClient client = getAdminClient();
         String storeName = storeDefs.get(0).getName();
         QuotaType quotaType = QuotaType.GET_THROUGHPUT;
-        Integer quota = 1000, targetQuota = quota / 2;
+        Long quota = 1000L, targetQuota = quota / 2;
         client.quotaMgmtOps.setQuotaForNode(storeName, quotaType, 0, quota);
         client.quotaMgmtOps.rebalanceQuota(storeName, quotaType);
         // rebalanceQuota use put. Put completes as soon as the required nodes
@@ -2562,10 +2568,10 @@ public class AdminServiceBasicTest {
         // as some of the puts are still in async. Sleep here to avoid those
         // conditions.
         Thread.sleep(100);
-        Integer getQuota0 = Integer.parseInt(client.quotaMgmtOps.getQuotaForNode(storeName,
+        Long getQuota0 = Long.parseLong(client.quotaMgmtOps.getQuotaForNode(storeName,
                                                                                  quotaType,
                                                                                  0).getValue());
-        Integer getQuota1 = Integer.parseInt(client.quotaMgmtOps.getQuotaForNode(storeName,
+        Long getQuota1 = Long.parseLong(client.quotaMgmtOps.getQuotaForNode(storeName,
                                                                                  quotaType,
                                                                                  1).getValue());
         assertEquals(targetQuota, getQuota0);

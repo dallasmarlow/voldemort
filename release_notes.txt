@@ -1,3 +1,65 @@
+Release 1.10.0 on 10/19/2015
+* Many many many fixes and improvements in the 1.9.x series of release! Many thanks to all contributors!
+* Minor improvements since the last patch release (1.9.22):
+  * Upgraded RocksDB to 3.13.1 and added more configurability options for it.
+  * Improvements to the benchmarking tool.
+  * Added a unit test for colliding keys in Read-Only data files.
+  * Added various safe-guards in case Read-Only index/data files become corrupted.
+
+Release 1.9.22 on 10/08/2015
+* Disk quota for Voldemort Read-Only pipeline
+* Improved debuggability of BnP HA
+* Added heart beat for NIO selector
+* Added additional keepalive settings to avoid client connection leaks
+* Trimmed fat from HadoopUtils
+* Proper interruption of BnP hooks
+
+Release 1.9.21 on 09/24/2015
+* Kerberos token caching now considered experimental (disabled by default).
+
+Release 1.9.20 on 09/14/2015
+* BnP/RO improvements:
+  * Various debuggability improvements.
+  * Graceful recovery from incomplete store creation.
+  * HA locking now happens on the server-side.
+  * Removed 'node.id' BnP config which caused a SPoF.
+* Script improvements:
+  * voldemort-shell.sh properly print Avro data.
+  * Forklifting makes a proper schema check.
+  * Binary fetch-entries format.
+* Unit tests improvements:
+  * Longer retry times on ServerTestUtils.startVoldemortServer().
+  * Ignored failing RocksDB test since it is unimplemented.
+  * New forklifting tests.
+* RocksDB iteration logic is now properly implemented.
+* Improved JMX beans management.
+* Fixed the routing strategy of the voldsys$_store_quotas store.
+
+Release 1.9.19 on 08/12/2015
+* Removed unused things (scala shell, ec2-testing, public-lib directory)
+* Fixed some unit tests.
+* Various BnP improvements:
+  * Improved logging.
+  * Added bnpJar gradle target for bundling BnP with its dependencies.
+  * Added run-bnp.sh script for running without Azkaban.
+* Various Read-Only server-side improvements:
+  * Upgrade to Hadoop 2.
+  * Kerberos authentication clean ups.
+  * Got rid of unused File Descriptor and other MemLock clean ups.
+  * Added STORAGE_SPACE quota API (not enforced yet).
+
+Release 1.9.18 on 07/20/2015
+* Various BnP improvements:
+  * Introduces of a limited form of High Availability for BnP.
+  * Improves path handling and validation in VoldemortSwapJob.
+  * Fetch throttling now works with block-level compression.
+  * Pushes to multiple colos now happen in parallel.
+  * Some code refactoring and clean ups.
+* Minor bug fixes in scripts:
+  * Fixes a SecurityException when running HadoopStoreJobRunner in Oozie.
+  * Fixes Coordinator start script.
+* EventThrottler code now uses Tehuti.
+
 Release 1.9.17 on 06/12/2015
 * Robust handling of connection failures
 * Flush the queue on marking a node down

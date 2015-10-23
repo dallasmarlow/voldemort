@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.http.client.HttpClient;
@@ -80,6 +81,7 @@ import voldemort.utils.ByteArray;
 import voldemort.utils.ByteUtils;
 import voldemort.utils.ClosableIterator;
 import voldemort.utils.Props;
+import voldemort.utils.Time;
 import voldemort.versioning.Versioned;
 import voldemort.xml.ClusterMapper;
 import voldemort.xml.StoreDefinitionsMapper;
@@ -150,17 +152,20 @@ public class ServerTestUtils {
                                                          int port,
                                                          int coreConnections,
                                                          int maxConnections,
-                                                         int bufferSize) {
+                                                         int bufferSize,
+                                                         long maxHeartBeatTimeMs) {
         AbstractSocketService socketService = null;
 
         if(useNio) {
             socketService = new NioSocketService(requestHandlerFactory,
                                                  port,
                                                  bufferSize,
+                                                 false,
                                                  coreConnections,
                                                  "client-request-service",
                                                  false,
-                                                 -1);
+                                                 -1,
+                                                 maxHeartBeatTimeMs);
         } else {
             socketService = new SocketService(requestHandlerFactory,
                                               port,
@@ -173,6 +178,22 @@ public class ServerTestUtils {
 
         return socketService;
     }
+
+    public static AbstractSocketService getSocketService(boolean useNio,
+                                                         RequestHandlerFactory requestHandlerFactory,
+                                                         int port,
+                                                         int coreConnections,
+                                                         int maxConnections,
+                                                         int bufferSize) {
+        return getSocketService(useNio,
+                                requestHandlerFactory,
+                                port,
+                                coreConnections,
+                                maxConnections,
+                                bufferSize,
+                                TimeUnit.MILLISECONDS.convert(3, TimeUnit.MINUTES));
+
+	}
 
     public static Store<ByteArray, byte[], byte[]> getSocketStore(SocketStoreFactory storeFactory,
                                                                   String storeName,
@@ -1062,11 +1083,16 @@ public class ServerTestUtils {
         // Need to trace through the constructor VoldemortServer(VoldemortConfig
         // config, Cluster cluster) to understand how this error is possible,
         // and why it only happens intermittently.
-        final int MAX_ATTEMPTS = 3;
+        final int MAX_NUMBER_OF_ATTEMPTS = 120;
+        final long MAX_RETRY_TIME_IN_MS = 5 * Time.MS_PER_MINUTE; // 5 minutes
         VoldemortException lastVE = null;
-        for(int i = 0; i < MAX_ATTEMPTS; i++) {
+        long startTime = System.currentTimeMillis(), currentTime = System.currentTimeMillis();
+        for (int i = 1;
+             (i <= MAX_NUMBER_OF_ATTEMPTS) && (currentTime - startTime < MAX_RETRY_TIME_IN_MS);
+             i++, currentTime = System.currentTimeMillis()) {
+            VoldemortServer server = null;
+            boolean success = false;
             try {
-                VoldemortServer server = null;
                 if(cluster != null) {
                     server = new VoldemortServer(config, cluster);
                 } else {
@@ -1075,14 +1101,24 @@ public class ServerTestUtils {
                 server.start();
                 ServerTestUtils.waitForServerStart(socketStoreFactory, server.getIdentityNode());
                 // wait till server starts or throw exception
+                success = true;
                 return server;
             } catch(VoldemortException ve) {
                 if(ve.getCause() instanceof BindException) {
                     ve.printStackTrace();
-                    trySleep(100);
+                    trySleep(Math.min(100 * i, 1000));
                     lastVE = ve;
                 } else {
                     throw ve;
+                }
+            } finally {
+                if (!success && server != null) {
+                    // This is in case new VoldemortServer() worked but ServerTestUtils.waitForServerStart() failed.
+                    try {
+                        server.stop();
+                    } catch (Exception e) {
+                        logger.error("Got an exception while trying to close a VoldemortServer", e);
+                    }
                 }
             }
         }

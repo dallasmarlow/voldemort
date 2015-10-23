@@ -46,7 +46,7 @@ public class ReadOnlyStorageConfiguration implements StorageConfiguration {
     private final int nodeId;
     private RoutingStrategy routingStrategy = null;
     private final int deleteBackupMs;
-    private boolean enforceMlock = false;
+    private final int maxValueBufferAllocationSize;
     private final VoldemortConfig voldConfig;
 
     public ReadOnlyStorageConfiguration(VoldemortConfig config) {
@@ -57,7 +57,7 @@ public class ReadOnlyStorageConfiguration implements StorageConfiguration {
                                                                                                    .trim()));
         this.nodeId = config.getNodeId();
         this.deleteBackupMs = config.getReadOnlyDeleteBackupMs();
-        this.enforceMlock = config.isUseMlock();
+        this.maxValueBufferAllocationSize = config.getReadOnlyMaxValueBufferAllocationSize();
         this.voldConfig = config;
     }
 
@@ -82,9 +82,9 @@ public class ReadOnlyStorageConfiguration implements StorageConfiguration {
                                                                          storeDef.getName()),
                                                                 numBackups,
                                                                 deleteBackupMs,
-                                                                enforceMlock);
+                                                                maxValueBufferAllocationSize);
         ObjectName objName = JmxUtils.createObjectName(JmxUtils.getPackageName(store.getClass()),
-                                                       storeDef.getName() + nodeId);
+                                                       storeDef.getName() );
         JmxUtils.registerMbean(ManagementFactory.getPlatformMBeanServer(),
                                JmxUtils.createModelMBean(store),
                                objName);
