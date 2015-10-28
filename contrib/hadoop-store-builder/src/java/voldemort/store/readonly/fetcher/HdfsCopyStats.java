@@ -14,6 +14,7 @@ import org.apache.commons.io.IOUtils;
 import org.apache.log4j.Logger;
 
 import voldemort.annotations.jmx.JmxGetter;
+import voldemort.utils.ByteUtils;
 import voldemort.utils.Time;
 
 /**
@@ -30,6 +31,7 @@ public class HdfsCopyStats {
     private volatile long lastReportNs;
     private final HdfsPathInfo pathInfo;
 
+    private File statsFile;
     private BufferedWriter statsFileWriter = null;
     public static final String STATS_DIRECTORY = ".stats";
     private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
@@ -77,6 +79,11 @@ public class HdfsCopyStats {
         return new File(destParent, STATS_DIRECTORY);
     }
 
+    public File getStatsFile() {
+        return this.statsFile;
+    }
+
+    private static final int STATS_VERSION = 3;
     private void initializeStatsFile(File destination,
                                      boolean enableStatsFile,
                                      int maxVersionsStatsFile,
@@ -107,15 +114,20 @@ public class HdfsCopyStats {
 
             deleteExtraStatsFiles(statsDirectory, maxVersionsStatsFile);
 
-            String destName = destination.getName();
-            File statsFile = new File(statsDirectory, destName);
+            String destName = destination.getName() + ".stats-v" + STATS_VERSION;
+            this.statsFile = new File(statsDirectory, destName);
             statsFile.createNewFile();
 
-            statsFileWriter = new BufferedWriter(new FileWriter(statsFile));
+            statsFileWriter = new BufferedWriter(new FileWriter(statsFile, true));
             statsFileWriter.write("Starting fetch at " + startTimeMS + "MS from " + sourceFile
                                   + " . Info: " + pathInfo);
             statsFileWriter.newLine();
-            statsFileWriter.write("Time, FileName, StartTime(MS), Size, TimeTaken(MS), Attempts #, TotalBytesTransferred, TotalBytesWritten");
+            /*
+             * When you add or remove columns, increase the version number
+             * STATS_VERSION so that script might be able to make automatic
+             * parsing of the columns
+             */
+            statsFileWriter.write("Time, FileName, StartTime(MS), Size, TimeTaken(MS), Attempts #, TotalBytesTransferred, TotalBytesWritten, CheckSum");
             statsFileWriter.newLine();
             statsFileWriter.flush();
 
@@ -203,9 +215,17 @@ public class HdfsCopyStats {
                                      long fileSize,
                                      long timeTakenMS,
                                      int attempts,
-                                     long totalBytesWritten) {
+                                     long totalBytesWritten,
+                                     byte[] checkSum) {
+        String fileCheckSum;
+        if(checkSum != null) {
+            fileCheckSum = ByteUtils.toHexString(checkSum);
+        } else {
+            fileCheckSum = "NO_CHECKSUM";
+        }
         reportStats(file.getName() + "," + startTimeMS + "," + fileSize + "," + timeTakenMS + ","
-                + attempts + "," + totalBytesTransferred + "," + totalBytesWritten);
+                    + attempts + "," + totalBytesTransferred + "," + totalBytesWritten + ","
+                    + fileCheckSum);
     }
 
     public void complete() {
